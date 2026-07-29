@@ -87,7 +87,7 @@ local function fetch()
         atomic_write(cfg.revision_path, tostring(next_revision))
         revision = next_revision
     end
-    return true
+    return true, snapshot.stopped == true
 end
 local function submit()
     local content = read(cfg.outbox_path)
@@ -101,22 +101,26 @@ local function submit()
     return true
 end
 
+local function recover_and_cleanup()
+    local pending = read(cfg.outbox_path)
+    if pending ~= nil then
+        os.execute("mkdir -p /mnt/us/.minfolio-recovery")
+        atomic_write("/mnt/us/.minfolio-recovery/" .. cfg.session_id .. ".md", pending)
+    end
+    prune_recovery()
+    os.execute("rm -rf " .. string.format("%q", cfg.directory))
+end
+
 while true do
     -- Sending first gives Kindle edits priority over any remote snapshot.
     submit()
-    fetch()
+    local _, stopped = fetch()
     -- MDEdit writes this only after its final autosave. A stopped desktop may
     -- deliberately reject that last upload, so retain one recovery copy rather
     -- than spinning forever on a closed session. Either way the worker exits:
     -- no orphaned Lua processes consuming Kindle CPU or battery.
-    if read(cfg.directory .. "/closing") then
-        local pending = read(cfg.outbox_path)
-        if pending ~= nil then
-            os.execute("mkdir -p /mnt/us/.minfolio-recovery")
-            atomic_write("/mnt/us/.minfolio-recovery/" .. cfg.session_id .. ".md", pending)
-        end
-        prune_recovery()
-        os.execute("rm -rf " .. string.format("%q", cfg.directory))
+    if stopped or read(cfg.directory .. "/closing") then
+        recover_and_cleanup()
         break
     end
     socket.sleep(0.6)
