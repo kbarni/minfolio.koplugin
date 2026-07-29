@@ -25,7 +25,6 @@ local Font = require("ui/font")
 Font.fontmap.ifont = Font.fontmap.ifont or "NotoSans-Italic.ttf"
 local Blitbuffer = require("ffi/blitbuffer")
 local UIManager = require("ui/uimanager")
-local Event = require("ui/event")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Widget = require("ui/widget/widget")
 local InputDialog = require("ui/widget/inputdialog")
@@ -70,6 +69,75 @@ if not CONFIG.state_dir and lfs.attributes("/mnt/us/minfolio", "mode") == "direc
     os.rename("/mnt/us/minfolio/frontlight.lua", FL_STATE_PATH)
 end
 MinfolioPair = { port = 42771 }
+-- Keep lifecycle evidence in KOReader's crash log without making the normal
+-- editor path noisy.  These markers make a silent UI-loop stall distinguishable
+-- from a clean KOReader exit after the next incident.  This is a table method
+-- rather than a local because the plugin is at LuaJIT's local-variable limit.
+function MinfolioPair.trace(event, ...)
+    logger.info("minfolio trace", event, ...)
+end
+
+-- KOReader's stock English keyboard devotes two bottom-row cells to cursor
+-- arrows (and exposes up/down on the symbol layers of N and M).  They are easy
+-- to hit accidentally in a compact editor, so make an app-local copy with no
+-- arrow actions.  Do not mutate the shared layout module: other KOReader views
+-- should retain their normal keyboard.
+function MinfolioPair.makeKeyboardArrowFree(keyboard)
+    local rows, removed = {}, 0
+    for _, row in ipairs(keyboard.KEYS or {}) do
+        local new_row = {}
+        for _, keydef in ipairs(row) do
+            local label = type(keydef) == "table" and keydef.label or keydef
+            if label == "←" or label == "→" or label == "↑" or label == "↓" then
+                removed = removed + 1
+            else
+                local copy = {}
+                if type(keydef) == "table" then
+                    for k, v in pairs(keydef) do copy[k] = v end
+                    -- N/M use arrows only in the alternate layers.  Retain the
+                    -- character rather than leaving an invisible, active key.
+                    for k, v in ipairs(copy) do
+                        if v == "↑" or v == "↓" or v == "←" or v == "→" then
+                            copy[k] = copy[2] or copy[1] or ""
+                        end
+                    end
+                else
+                    copy = keydef
+                end
+                table.insert(new_row, copy)
+            end
+        end
+        table.insert(rows, new_row)
+    end
+    if removed == 0 then return end
+    -- On the English layout this exactly fills the two removed bottom-row cells.
+    local last_row = rows[#rows]
+    for _, keydef in ipairs(last_row or {}) do
+        if type(keydef) == "table" and keydef.label == "_" then
+            keydef.width = (tonumber(keydef.width) or 1) + removed
+            break
+        end
+    end
+    keyboard.KEYS = rows
+    keyboard:initLayer(keyboard.keyboard_layer)
+end
+
+function MinfolioPair.disableKeyboardKeyFlash(keyboard)
+    -- VirtualKey normally calls forceRePaint() and yieldToEPDC() for every tap
+    -- when the global setting is absent (its default is enabled).  On e-ink that
+    -- synchronous wait prevents the touch queue from keeping up with fast typing.
+    -- Keep this local to Minfolio and reapply it whenever Shift/Symbol rebuilds
+    -- the key widgets.
+    local stock_init_layer = keyboard.initLayer
+    function keyboard:initLayer(layer)
+        stock_init_layer(self, layer)
+        for _, row in ipairs(self.layout or {}) do
+            for _, key in ipairs(row) do key.flash_keyboard = false end
+        end
+    end
+    keyboard:initLayer(keyboard.keyboard_layer)
+end
+
 function MinfolioPair.deviceId()
     local f = io.open("/proc/usid", "r")
     local id = f and f:read("*l") or nil
@@ -114,15 +182,26 @@ function MinfolioPair.pollRequest()
 end
 function MinfolioPair.poll()
     if not MinfolioPair.sock then return end
-    while true do
+    -- UDP is untrusted input.  Draining an endless datagram queue in a single
+    -- UI callback can starve taps, rendering, and suspend handling.
+    local processed, max_per_tick = 0, 32
+    while processed < max_per_tick do
         local raw, ip, reply_port = MinfolioPair.sock:receivefrom()
         if not raw then break end
+        processed = processed + 1
         local ok, msg = pcall(function() return rapidjson.decode(raw) end)
         if ok and msg.type == "minfolio-discover" and msg.nonce then
             local reply = rapidjson.encode({ type = "minfolio-device", nonce = msg.nonce, id = MinfolioPair.deviceId(), label = "Kindle Minfolio" })
             MinfolioPair.sock:sendto(reply, ip, reply_port)
         elseif ok and msg.type == "minfolio-pair-request" then
             MinfolioPair.showPrompt(msg)
+        end
+    end
+    if processed == max_per_tick then
+        local now = now_seconds()
+        if not MinfolioPair._last_backpressure_log or now - MinfolioPair._last_backpressure_log >= 30 then
+            MinfolioPair._last_backpressure_log = now
+            logger.warn("minfolio discovery queue capped; deferring remaining UDP datagrams")
         end
     end
 end
@@ -135,6 +214,7 @@ function MinfolioPair.start()
     if MinfolioPair.sock then return end
     local s = socket.udp(); if not s then return end
     s:setsockname("*", MinfolioPair.port); s:setoption("broadcast", true); s:settimeout(0); MinfolioPair.sock = s
+    MinfolioPair.trace("discovery-start", "port=", MinfolioPair.port)
     local function tick() MinfolioPair.poll(); MinfolioPair.pollRequest(); MinfolioPair.beacon(); UIManager:scheduleIn(0.75, tick) end
     UIManager:scheduleIn(0.25, tick)
 end
@@ -234,9 +314,25 @@ local function read_minfolio_state()
 end
 local MINFOLIO_STATE = read_minfolio_state()
 MINFOLIO_STATE.scale = clamp_minfolio_scale(MINFOLIO_STATE.scale or CONFIG.minfolio_scale)
+MINFOLIO_STATE.positions = type(MINFOLIO_STATE.positions) == "table" and MINFOLIO_STATE.positions or {}
 local function save_minfolio_state()
     lfs.mkdir(STATE_DIR)
-    write_file(MINFOLIO_STATE_PATH, string.format("return { scale = %.3f }\n", clamp_minfolio_scale(MINFOLIO_STATE.scale)))
+    local positions = {}
+    for path, position in pairs(MINFOLIO_STATE.positions) do
+        if type(path) == "string" and type(position) == "table" then
+            local line = math.max(1, math.floor(tonumber(position.line) or 1))
+            local ri = math.max(1, math.floor(tonumber(position.ri) or 1))
+            local crow = math.max(1, math.floor(tonumber(position.crow) or 1))
+            local ccol = math.max(0, math.floor(tonumber(position.ccol) or 0))
+            positions[#positions + 1] = string.format(
+                "[%q] = { line = %d, ri = %d, kind = %q, crow = %d, ccol = %d, reader_mode = %s },",
+                path, line, ri, tostring(position.kind or "row"), crow, ccol,
+                position.reader_mode and "true" or "false")
+        end
+    end
+    write_file(MINFOLIO_STATE_PATH, string.format(
+        "return { scale = %.3f, positions = { %s } }\n",
+        clamp_minfolio_scale(MINFOLIO_STATE.scale), table.concat(positions, " ")))
 end
 local FL
 local function save_frontlight_state()
@@ -370,6 +466,14 @@ local function show_controls(extra, on_close)
         title = "Controls", item_table = items, is_popout = true,
         width = math.floor(Screen:getWidth() * 0.72), height = math.floor(Screen:getHeight() * 0.7),
         onMenuSelect = function(_s, item)
+            local sub_items = item.sub_item_table
+            if not sub_items and item.sub_item_table_func then sub_items = item.sub_item_table_func() end
+            if sub_items ~= nil then
+                sub_items.title = menu.title
+                table.insert(menu.item_table_stack, menu.item_table)
+                menu:switchItemTable(item.text, sub_items)
+                return true
+            end
             if item.keep then
                 if item.callback then item.callback() end
                 return
@@ -512,8 +616,18 @@ local function md_trim(s)
     return tostring(s or ""):match("^%s*(.-)%s*$") or ""
 end
 
+-- Markdown tables are permitted inside blockquotes.  Keep the prefix out of
+-- the table grammar, but retain its byte width so cell edits still replace the
+-- correct ranges in the original source line.
+local function md_table_row_prefix(line)
+    return tostring(line or ""):match("^(%s*>%s?)") or ""
+end
+
 local function md_split_table_row(line)
     line = tostring(line or "")
+    local prefix = md_table_row_prefix(line)
+    local source_offset = #prefix
+    if source_offset > 0 then line = line:sub(source_offset + 1) end
     if not line:find("|", 1, true) then return nil end
     local first_pipe = line:find("|", 1, true)
     local last_pipe
@@ -550,14 +664,14 @@ local function md_split_table_row(line)
         end
         cells[#cells+1] = {
             text = text,
-            start_col = math.max(0, text_start - 1),
-            end_col = math.max(0, text_end),
+            start_col = math.max(0, source_offset + text_start - 1),
+            end_col = math.max(0, source_offset + text_end),
         }
         cell_start = pipe + 1
         if pipe > end_pos then break end
     end
     if #cells < 2 then return nil end
-    return cells
+    return cells, prefix
 end
 
 local function md_table_separator(cells)
@@ -574,9 +688,10 @@ local function md_table_separator(cells)
 end
 
 local function md_table_block(lines, start_i)
-    local header = md_split_table_row(lines[start_i])
+    local header, prefix = md_split_table_row(lines[start_i])
     if not header then return nil end
-    local sep = md_split_table_row(lines[start_i + 1])
+    local sep, sep_prefix = md_split_table_row(lines[start_i + 1])
+    if prefix ~= sep_prefix then return nil end
     local aligns = md_table_separator(sep)
     if not aligns then return nil end
     local ncols = #sep
@@ -588,8 +703,8 @@ local function md_table_block(lines, start_i)
     local finish = start_i + 1
     local i = start_i + 2
     while i <= #lines do
-        local cells = md_split_table_row(lines[i])
-        if not cells or #cells < 2 or md_table_separator(cells) then break end
+        local cells, row_prefix = md_split_table_row(lines[i])
+        if not cells or row_prefix ~= prefix or #cells < 2 or md_table_separator(cells) then break end
         rows[#rows+1] = { line = i, cells = cells }
         finish = i
         i = i + 1
@@ -1303,6 +1418,8 @@ function MindmapView:showMapKeyboard()
     if self.keyboard or not Device:isTouchDevice() then return end
     local VirtualKeyboard = require("ui/widget/virtualkeyboard")
     local keyboard = VirtualKeyboard:new{ inputbox = self }
+    MinfolioPair.makeKeyboardArrowFree(keyboard)
+    MinfolioPair.disableKeyboardKeyFlash(keyboard)
     keyboard.modal = false
     self.keyboard = keyboard
     local map, original_close = self, keyboard.onCloseWidget
@@ -1945,6 +2062,7 @@ function MDEdit:init()
     self._file_signature = file_signature(self.path)
     self._file_text = text
     self.crow, self.ccol, self.top, self.vtop = 1, 0, 1, 1
+    self:restorePosition()
     if Device:isTouchDevice() then
         self.ges_events = {
             Tap       = { GestureRange:new{ ges = "tap",        range = self.dimen } },
@@ -1969,6 +2087,52 @@ function MDEdit:init()
     -- the newly-built editor beneath it.
     self:scheduleCaretBlink(MDEDIT_CARET_RESUME_DELAY)
     self:scheduleFilePoll()
+    MinfolioPair.trace("editor-open", "path=", tostring(self.path), "lines=", #self.lines,
+        "remote=", self.remote and "yes" or "no")
+    self:scheduleHeartbeat(10)
+end
+-- Store a logical visual-row anchor, not a raw visual row number. This lets a
+-- note reopen at the same passage after a rotation or a font-size change has
+-- changed how many screen rows the preceding text occupies.
+function MDEdit:restorePosition()
+    if self.remote then return end -- remote documents are short-lived session shadows
+    local position = MINFOLIO_STATE.positions[self.path]
+    if type(position) ~= "table" then return end
+
+    self.crow = math.max(1, math.min(#self.lines, math.floor(tonumber(position.crow) or 1)))
+    self.ccol = math.max(0, math.min(#(self.lines[self.crow] or ""), math.floor(tonumber(position.ccol) or 0)))
+    self.reader_mode = not not position.reader_mode
+
+    local target_line = math.max(1, math.floor(tonumber(position.line) or self.crow))
+    local target_ri = math.max(1, math.floor(tonumber(position.ri) or 1))
+    local target_kind = type(position.kind) == "string" and position.kind or nil
+    local rows = self:visualRows(self:textWidth())
+    for vi, row in ipairs(rows) do
+        if row.line == target_line and (not target_kind or row.kind == target_kind)
+            and (row.ri or 1) >= target_ri then
+            self.vtop = vi
+            break
+        end
+    end
+    -- In edit mode, rebuilding normally scrolls to the caret. Mark this as a
+    -- deliberate restored scroll position so the saved passage takes priority.
+    if not self.reader_mode then
+        self._manual_scroll_cursor = { row = self.crow, col = self.ccol }
+    end
+end
+function MDEdit:savePosition()
+    if self.remote then return end
+    local rows = self:visualRows(self:textWidth())
+    local top = rows[math.max(1, math.min(#rows, self.vtop or 1))] or {}
+    MINFOLIO_STATE.positions[self.path] = {
+        line = top.line or self.crow or 1,
+        ri = top.ri or 1,
+        kind = top.kind or "row",
+        crow = self.crow or 1,
+        ccol = self.ccol or 0,
+        reader_mode = self.reader_mode,
+    }
+    save_minfolio_state()
 end
 -- a thin caret bar that sits between styled spans without disturbing them
 function MDEdit:caret(h)
@@ -2109,6 +2273,31 @@ function MDEdit:buildTopBar(cw)
     local title_face = Font:getFace("cfont", 22)
     local raw_title = self.path:match("[^/]+$") or "note"
     self.top_zones = {}
+    -- Find is a temporary mode: its compact controls replace the formatting
+    -- toolbar, leaving a persistent query field and touch-sized navigation
+    -- targets instead of obscuring the document with a dialog.
+    if self._find_bar_visible then
+        local action_face = Font:getFace("tfont", 21)
+        local prev_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Previous", action_face) + 18)
+        local next_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Next", action_face) + 18)
+        local done_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Done", action_face) + 18)
+        local query_w = math.max(80, cw - prev_w - next_w - done_w)
+        local query = self:trimToWidth((self._find_query and self._find_query ~= "")
+            and ("Find: " .. self._find_query) or "Find: enter text", query_w - 16, title_face)
+        local x = 0
+        self.top_zones.find_input = { x0 = x, x1 = x + query_w }; x = x + query_w
+        self.top_zones.find_previous = { x0 = x, x1 = x + prev_w }; x = x + prev_w
+        self.top_zones.find_next = { x0 = x, x1 = x + next_w }; x = x + next_w
+        self.top_zones.find_done = { x0 = x, x1 = x + done_w }
+        return HorizontalGroup:new{ align = "center",
+            FrameContainer:new{ bordersize = 1, padding = 5, margin = 0, width = query_w, height = MDEDIT_TOPBAR_H,
+                CenterContainer:new{ dimen = Geom:new{ w = query_w - 12, h = MDEDIT_TOPBAR_H - 2 },
+                    TextWidget:new{ text = query, face = title_face, fgcolor = Blitbuffer.COLOR_BLACK } } },
+            self:toolCell("Previous", "tfont", 21, prev_w),
+            self:toolCell("Next", "tfont", 21, next_w),
+            self:toolCell("Done", "tfont", 21, done_w),
+        }
+    end
     if self.reader_mode then
         -- Reader mode: no formatting toolbar. A single explicit "Edit" button so
         -- the reader never has to guess the double-tap gesture.
@@ -2175,7 +2364,11 @@ end
 -- same title and eight tool glyphs again for every input flush and caret blink.
 -- Reuse it until width or mode changes; keep the matching hit zones with it.
 function MDEdit:topBar(cw)
-    local key = table.concat({ tostring(cw), self.reader_mode and "reader" or "edit" }, "|")
+    -- Tag the find component rather than storing the bare query: an empty query
+    -- is a real find-bar state ("Find: enter text"), and it must not collide
+    -- with the no-find-bar key or the cache serves the wrong bar and hit zones.
+    local key = table.concat({ tostring(cw), self.reader_mode and "reader" or "edit",
+        self._find_bar_visible and ("find:" .. (self._find_query or "")) or "nofind" }, "|")
     local cached = self._topbar_cache
     if cached and cached.key == key then
         self.top_zones = cached.zones
@@ -2645,6 +2838,43 @@ function MDEdit:openTableCellEditor(hit)
             end },
         }},
     }
+    local input = dlg._input_widget
+    if input then
+        local function input_prev_word_pos()
+            local p = math.max(1, math.min(input.charpos or 1, #(input.charlist or {}) + 1))
+            while p > 1 and char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
+            while p > 1 and not char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
+            return p
+        end
+        local function input_next_word_pos()
+            local p = math.max(1, math.min(input.charpos or 1, #(input.charlist or {}) + 1))
+            while p <= #(input.charlist or {}) and char_is_space(input.charlist[p] or "") do p = p + 1 end
+            while p <= #(input.charlist or {}) and not char_is_space(input.charlist[p] or "") do p = p + 1 end
+            return p
+        end
+        local function input_del_word_left()
+            local p = input.charpos or 1
+            local start = input_prev_word_pos()
+            if start < p then input:delSelection(start, p - 1) else input:delChar() end
+        end
+        local original_on_key_press = input.onKeyPress
+        function input:onKeyPress(key)
+            local name = key and key.key
+            local mods = key_mods(key)
+            if name and word_key_mod(mods) and left_key(name) then
+                self:moveCursorToCharPos(input_prev_word_pos())
+                return true
+            elseif name and word_key_mod(mods) and right_key(name) then
+                self:moveCursorToCharPos(input_next_word_pos())
+                return true
+            elseif name and word_key_mod(mods)
+                and (name == "Backspace" or name == "BackSpace" or name == "Del" or name == "Delete") then
+                input_del_word_left()
+                return true
+            end
+            return original_on_key_press(self, key)
+        end
+    end
     -- MDEdit is normally always active so external keyboards work reliably. A
     -- modal input field is the exception: suspend the document's key handler so
     -- physical keystrokes are delivered exclusively to InputDialog.
@@ -3031,7 +3261,7 @@ function MDEdit:lineBand(row)
         end
     end
     if not y0 then return nil end
-    return Geom:new{ x = 0, y = math.max(0, y0 - 2), w = self.fw, h = (y1 - y0) + 4 }
+    return Geom:new{ x = 0, y = math.max(0, y0 - 2), w = self.fw, h = (y1 - y0) + 10 }
 end
 -- Band (full width) from the cursor's own visual row down through the rest of the
 -- current logical line. A same-line edit changes the cursor's row AND can rewrap
@@ -3054,7 +3284,7 @@ function MDEdit:cursorRowBand()
         end
     end
     if not y0 then return self:lineBand(self.crow) end   -- fallback: whole line
-    return Geom:new{ x = 0, y = math.max(0, y0 - 2), w = self.fw, h = (y1 - y0) + 4 }
+    return Geom:new{ x = 0, y = math.max(0, y0 - 2), w = self.fw, h = (y1 - y0) + 10 }
 end
 -- Stable description of the pixels produced by one wrapped text row. Comparing
 -- these before and after a local edit lets us skip wrapped rows whose contents did
@@ -3158,7 +3388,7 @@ function MDEdit:changedLineRegions(prev_row_map, row_map, row, prev_col, col)
                 end
             end
             local y0 = math.max(0, math.min(before.y0, after.y0) - 2)
-            local y1 = math.max(before.y1, after.y1) + 2
+            local y1 = math.max(before.y1, after.y1) + 8
             regions[#regions+1] = Geom:new{
                 x = x, y = y0, w = math.max(1, self.fw - x), h = math.max(1, y1 - y0),
             }
@@ -3255,11 +3485,18 @@ function MDEdit:refresh(opts)
     local prev_caret = self.caret_region
     local prev_row_map = self.row_map
     local prev_sel_multiline = self._render_sel_multiline
+    local prev_has_selection = not not self._render_has_selection
     self:rebuild()
     local region = self.keyboard and self.editor_refresh_region or nil
     local regions
     local vtop_changed = prev_vtop and self.vtop and prev_vtop ~= self.vtop
+    -- A same-line selection used to disappear from state without repainting:
+    -- unlike multi-line selections it had no special dirty hint. Track whether
+    -- the previous frame had any visible selection so clearing it always erases
+    -- the old highlight.
+    local has_selection = self:hasSel()
     local selection_dirty = opts.selection or prev_sel_multiline or self:selectionIsMultiline()
+        or prev_has_selection ~= has_selection
     local band = self:lineBand(self.crow)
     local line_geometry_changed = prev_band and band
         and (prev_band.y ~= band.y or prev_band.h ~= band.h)
@@ -3333,6 +3570,7 @@ function MDEdit:refresh(opts)
     self._render_crow = self.crow
     self._render_ccol = self.ccol
     self._render_sel_multiline = self:selectionIsMultiline()
+    self._render_has_selection = has_selection
     self._last_dirty_at = now_seconds()
     self._last_dirty_region = regions and self.caret_region or region
     self._last_dirty_full = not regions and region == nil
@@ -3460,6 +3698,29 @@ function MDEdit:scheduleFilePoll()
     end
     self._file_poll_pending = fn
     UIManager:scheduleIn(MDEDIT_FILE_RELOAD_INTERVAL, fn)
+end
+-- A heartbeat is intentionally infrequent.  If the UI loop is delayed, the
+-- next entry records the gap; if KOReader dies, the last marker identifies the
+-- last known healthy editor state without materially affecting battery life.
+function MDEdit:scheduleHeartbeat(delay)
+    if self._heartbeat_pending then
+        UIManager:unschedule(self._heartbeat_pending)
+        self._heartbeat_pending = nil
+    end
+    local fn
+    fn = function()
+        if self._heartbeat_pending == fn then self._heartbeat_pending = nil end
+        if self._closing then return end
+        local now = now_seconds()
+        local gap = self._heartbeat_at and (now - self._heartbeat_at) or 0
+        MinfolioPair.trace("editor-heartbeat", "path=", tostring(self.path),
+            "gap=", string.format("%.2f", gap), "row=", self.crow or 0,
+            "vtop=", self.vtop or 0, "dirty=", self._dirty and "yes" or "no")
+        self._heartbeat_at = now
+        self:scheduleHeartbeat(60)
+    end
+    self._heartbeat_pending = fn
+    UIManager:scheduleIn(delay or 60, fn)
 end
 function MDEdit:snapshot()
     self:scheduleAutosave()
@@ -3658,9 +3919,37 @@ function MDEdit:queueTypedChar(ch)
     self._type_flush_pending = fn
     UIManager:scheduleIn(delay, fn)
 end
+function MDEdit:queueVirtualChars(s)
+    self:pauseCaretBlinkForInput()
+    self._type_buffer = (self._type_buffer or "") .. s
+    self._virtual_key_count = (self._virtual_key_count or 0) + #s
+    -- On-screen input has no hardware repeat to keep responsive.  More
+    -- importantly, rebuilding the Markdown view every 45 ms can monopolize the
+    -- Kindle's UI loop long enough for subsequent touch contacts to be dropped.
+    -- Debounce the visual update instead: taps only append a short Lua string,
+    -- then the complete burst is rendered once the finger cadence pauses.
+    if self._type_flush_pending then
+        UIManager:unschedule(self._type_flush_pending)
+        self._type_flush_pending = nil
+    end
+    local fn
+    fn = function()
+        if self._type_flush_pending == fn then self._type_flush_pending = nil end
+        local text = self._type_buffer
+        self._type_buffer = nil
+        if text and text ~= "" then self:insertTypedText(text) end
+    end
+    self._type_flush_pending = fn
+    UIManager:scheduleIn(0.18, fn)
+end
 function MDEdit:addChars(s)
-    if s == "\n" then return self:newline() end
-    self:insertTypedText(s)
+    -- Newline remains an immediate structural edit, after flushing any pending
+    -- virtual text. Regular on-screen keys use the debounce above.
+    if s == "\n" then
+        self:flushTypeBuffer()
+        return self:newline()
+    end
+    self:queueVirtualChars(s)
 end
 function MDEdit:newline()
     self:flushTypeBuffer()
@@ -3777,27 +4066,226 @@ function MDEdit:scrollBy(lines)
     end
     self:refreshScroll()
 end
+function MDEdit:pageBy(direction)
+    local old = self.vtop or 1
+    local last = self._last_page_scroll
+    local step
+    if last and last.from ~= last.to and last.to == old and last.dir == -direction then
+        step = math.abs(last.to - last.from)
+    else
+        step = self:pageStep(direction)
+    end
+    self:scrollBy(direction * step)
+    if self.vtop ~= old then
+        self._last_page_scroll = { dir = direction, from = old, to = self.vtop or old }
+    else
+        self._last_page_scroll = nil
+    end
+end
 -- Page turns advance by roughly 3/4 of the visible editor height. Count
 -- rendered row heights instead of visible row count so headings, gaps, and
 -- tables don't distort physical scroll distance.
-function MDEdit:pageStep()
+function MDEdit:pageStep(direction)
     local rows = self._vrows
     local start = self.vtop or 1
     if not rows or #rows == 0 then return math.max(1, math.floor((self.visible_vrows or 12) * 0.75)) end
     local target = math.max(1, math.floor((self.visible_budget or math.floor(self.fh / 2)) * 0.75))
     local step, used = 0, 0
-    while start + step <= #rows and used < target do
-        step = step + 1
-        used = used + self:visualRowHeight(rows[start + step - 1])
+    if (direction or 1) < 0 then
+        while start - step > 1 and used < target do
+            step = step + 1
+            used = used + self:visualRowHeight(rows[start - step])
+        end
+    else
+        while start + step <= #rows and used < target do
+            step = step + 1
+            used = used + self:visualRowHeight(rows[start + step - 1])
+        end
     end
     return math.max(1, step)
 end
-function MDEdit:pageUp()   self:scrollBy(-self:pageStep()) end
-function MDEdit:pageDown() self:scrollBy(self:pageStep()) end
+function MDEdit:pageUp()   self:pageBy(-1) end
+function MDEdit:pageDown() self:pageBy(1) end
 function MDEdit:pageLeft()  self:pageUp() end
 function MDEdit:pageRight() self:pageDown() end
 function MDEdit:pageFromTap(pos)
     if pos and pos.x < (self.fw / 2) then self:pageLeft() else self:pageRight() end
+end
+function MDEdit:outlineItems()
+    self:flushTypeBuffer()
+    local items = {}
+    for i, line in ipairs(self.lines or {}) do
+        local hashes, text = tostring(line or ""):match("^(#{1,6})%s+(.-)%s*$")
+        if hashes then
+            local level = #hashes
+            local indent = string.rep("  ", math.max(0, level - 1))
+            local label = md_trim(text)
+            if label ~= "" then
+                items[#items+1] = {
+                    text = string.format("%s%s", indent, label),
+                    callback = function() self:jumpToLine(i) end,
+                }
+            end
+        end
+    end
+    if #items == 0 then
+        items[1] = { text = _("No headings"), select_enabled = false, dim = true }
+    end
+    return items
+end
+function MDEdit:jumpToLine(line)
+    self:flushTypeBuffer()
+    local target = math.max(1, math.min(tonumber(line) or 1, #self.lines))
+    self.crow, self.ccol = target, 0
+    self.sel, self._desired_x, self._burst = nil, nil, nil
+    local vrows = self:visualRows(self:textWidth())
+    local target_vi = 1
+    for vi, vr in ipairs(vrows or {}) do
+        if vr.line and vr.line >= target then target_vi = vi; break end
+    end
+    self.vtop = target_vi
+    self._manual_scroll_cursor = { row = self.crow, col = self.ccol }
+    self:refreshScroll()
+end
+-- ---- find ---------------------------------------------------------------
+-- Find deliberately uses the editor selection for the active result. This
+-- makes the match visible in both the styled editor and reader mode, and keeps
+-- copy/keyboard behaviour consistent with a normal text selection.
+function MDEdit:findMatches(query)
+    if not query or query == "" then return {} end
+    local needle = query:lower()
+    local matches = {}
+    for row, line in ipairs(self.lines or {}) do
+        local haystack = tostring(line or ""):lower()
+        local from = 1
+        while true do
+            local first, last = haystack:find(needle, from, true)
+            if not first then break end
+            matches[#matches + 1] = { row = row, start_col = first - 1, end_col = last }
+            from = last + 1 -- non-overlapping results, like standard Find
+        end
+    end
+    return matches
+end
+function MDEdit:showFindMatch(match, index, total)
+    if not match then return false end
+    self._find_match = match
+    self._find_match_index = index
+    self.sel = { row = match.row, col = match.start_col }
+    self.crow, self.ccol = match.row, match.end_col
+    self._desired_x, self._burst = nil, nil
+    local target_vi = 1
+    for vi, row in ipairs(self:visualRows(self:textWidth()) or {}) do
+        local text_row = row.row or {}
+        local row_end = text_row.sb or 0
+        for _, seg in ipairs(text_row.segs or {}) do row_end = math.max(row_end, (seg.sb or 0) + #(seg.text or "")) end
+        if row.line == match.row and (text_row.sb or 0) <= match.start_col and row_end >= match.start_col then
+            target_vi = vi
+            break
+        end
+    end
+    self.vtop = target_vi
+    self._manual_scroll_cursor = { row = self.crow, col = self.ccol }
+    self:refresh{ layout_dirty = false, selection = true }
+    notify(string.format(_("Match %d of %d"), index, total))
+    return true
+end
+function MDEdit:findNext(query, direction)
+    self:flushTypeBuffer()
+    query = query or self._find_query or ""
+    if query == "" then notify(_("Enter text to find")); return false end
+    self._find_query = query
+    self._find_bar_visible = true
+    local matches = self:findMatches(query)
+    if #matches == 0 then
+        self._find_match, self._find_match_index = nil, nil
+        self:refresh{ layout_dirty = false, full = true }
+        notify(_("No matches"))
+        return false
+    end
+    direction = direction or 1
+    local current = self._find_match_index
+    local active = self._find_match
+    if not (active and active.row == self.crow and active.end_col == self.ccol
+        and self.sel and self.sel.row == active.row and self.sel.col == active.start_col) then
+        current = nil
+    end
+    if current and matches[current]
+        and matches[current].row == active.row and matches[current].start_col == active.start_col then
+        current = ((current - 1 + direction) % #matches) + 1
+    elseif direction > 0 then
+        current = 1
+        for i, match in ipairs(matches) do
+            if match.row > self.crow or (match.row == self.crow and match.start_col >= self.ccol) then
+                current = i
+                break
+            end
+        end
+    else
+        current = #matches
+        for i = #matches, 1, -1 do
+            local match = matches[i]
+            if match.row < self.crow or (match.row == self.crow and match.end_col <= self.ccol) then
+                current = i
+                break
+            end
+        end
+    end
+    local index = current
+    return self:showFindMatch(matches[index], index, #matches)
+end
+function MDEdit:goToFindMatch()
+    local matches = self:findMatches(self._find_query)
+    local index = self._find_match_index
+    if index and matches[index] then return self:showFindMatch(matches[index], index, #matches) end
+    return self:findNext(self._find_query, 1)
+end
+function MDEdit:openFindDialog()
+    self:flushTypeBuffer()
+    if self._find_dialog then return end
+    if self.keyboard then self:hideKeyboard() end
+    local initial = self._find_query or (self:hasSel() and self:selText()) or ""
+    local dlg
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self._find_dialog = nil
+        self.is_always_active = true
+        self:refresh{ layout_dirty = false, full = true }
+    end
+    local function close_then(action)
+        local query = dlg:getInputText() or ""
+        UIManager:close(dlg)
+        if action then action(query) end
+    end
+    dlg = InputDialog:new{
+        title = _("Find"),
+        input = initial,
+        buttons = {
+            {
+                { text = _("Cancel"), callback = function() close_then() end },
+                { text = _("Previous"), callback = function() close_then(function(q) self:findNext(q, -1) end) end },
+            },
+            {
+                { text = _("Next"), is_enter_default = true, callback = function() close_then(function(q) self:findNext(q, 1) end) end },
+                { text = _("Go to match"), callback = function() close_then(function(q)
+                    self._find_query = q
+                    self._find_bar_visible = true
+                    self:goToFindMatch()
+                end) end },
+            },
+        },
+    }
+    self._find_dialog = dlg
+    self.is_always_active = false
+    local original_close = dlg.onCloseWidget
+    function dlg:onCloseWidget()
+        if original_close then original_close(self) end
+        restore_focus()
+    end
+    UIManager:show(dlg)
+    dlg:onShowKeyboard()
 end
 function MDEdit:setReaderMode(enabled, target_row, target_col)
     enabled = not not enabled
@@ -3829,6 +4317,8 @@ function MDEdit:showKeyboard()
     if self.keyboard then return end
     local VirtualKeyboard = require("ui/widget/virtualkeyboard")
     local keyboard = VirtualKeyboard:new{ inputbox = self }
+    MinfolioPair.makeKeyboardArrowFree(keyboard)
+    MinfolioPair.disableKeyboardKeyFlash(keyboard)
     keyboard.modal = false
     self.keyboard = keyboard
     local editor = self
@@ -3844,6 +4334,13 @@ function MDEdit:showKeyboard()
     end
     self:refresh{ layout_dirty = false, full = true }
     UIManager:show(keyboard)
+end
+
+function MDEdit:isPointInKeyboard(pos)
+    if not self.keyboard or not pos then return false end
+    local dimen = self.keyboard.dimen
+    local top = dimen and dimen.y or (self.fh - ((dimen and dimen.h) or math.floor(self.fh * 0.36)))
+    return pos.y >= top
 end
 function MDEdit:hideKeyboard()
     if not self.keyboard then return end
@@ -3877,11 +4374,14 @@ function MDEdit:isKeyboardHideGesture(ges)
     local kbd_h = (self.keyboard.dimen and self.keyboard.dimen.h) or math.floor(self.fh * 0.36)
     local kbd_top = self.fh - kbd_h
     local start_y = sp.y or p.y or 0
+    local dx = (p.x or 0) - (sp.x or 0)
     local dy = (p.y or 0) - (sp.y or 0)
     -- Start within the strip just above the keyboard (in the text area, so we get
-    -- the event), moving downward.
+    -- the event), then move clearly downward.  KOReader can label a diagonal or
+    -- even mostly horizontal select-drag as "south", so do not trust its
+    -- direction field without checking the actual displacement.
     local near_kbd_top = start_y >= kbd_top - MDEDIT_KEYBOARD_SWIPE_EDGE and start_y <= kbd_top
-    local downward = (ges.direction == "south") or dy >= MDEDIT_KEYBOARD_SWIPE_DY
+    local downward = dy >= MDEDIT_KEYBOARD_SWIPE_DY and math.abs(dy) >= math.abs(dx) * 1.25
     return near_kbd_top and downward
 end
 function MDEdit:save()
@@ -3922,6 +4422,7 @@ function MDEdit:onScreenResize()
     return true
 end
 function MDEdit:onResume()
+    MinfolioPair.trace("editor-resume", "path=", tostring(self.path))
     self:checkExternalFile()
     self.caret_on = true
     self:refresh{ layout_dirty = false, full = true }
@@ -3929,6 +4430,7 @@ function MDEdit:onResume()
     schedule_wake_repaint()
 end
 function MDEdit:onSuspend()
+    MinfolioPair.trace("editor-suspend", "path=", tostring(self.path))
     FL.captureBeforeSuspend()
 end
 function MDEdit:schedulePhysicalKeyboardRepaint()
@@ -3988,14 +4490,20 @@ function MDEdit:saveAndOpenMarkdown()
     if open_markdown_picker then open_markdown_picker(path_parent(self.path)) end
 end
 function MDEdit:onCloseWidget()
+    MinfolioPair.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
     self._closing = true
     -- Flush before signalling the worker. The old ordering removed the shadow
     -- first, then autosave recreated it, leaving an orphaned remote session.
     self:flushTypeBuffer()
     self:flushAutosave()
+    self:savePosition()
     if self.remote then
         write_file(self.remote.closing_path, "1")
-        os.remove(MINFOLIO_REMOTE_DIR .. "/remote-session.lua")
+        -- `remote-session.lua` is a shared handoff owned by the desktop
+        -- launcher.  A successor session may already have replaced it while
+        -- this editor is closing; deleting it here races that launch and can
+        -- leave the new worker/editor with no descriptor. The per-session
+        -- `closing` marker is the only state this editor owns.
     end
     if active_mdedit == self then active_mdedit = nil end
     self._caret_blinking = false
@@ -4004,6 +4512,7 @@ function MDEdit:onCloseWidget()
         self._caret_blink_pending = nil
     end
     if self._file_poll_pending then UIManager:unschedule(self._file_poll_pending); self._file_poll_pending = nil end
+    if self._heartbeat_pending then UIManager:unschedule(self._heartbeat_pending); self._heartbeat_pending = nil end
     if self._page_pending then UIManager:unschedule(self._page_pending); self._page_pending = nil end
     if self._pan_reset then UIManager:unschedule(self._pan_reset); self._pan_reset = nil end
     if self._physical_keyboard_repaint_pending then
@@ -4024,6 +4533,11 @@ end
 function MDEdit:onKeyPress(key)
     local name = key and key.key
     if not name then return true end
+    local m = key_mods(key)
+    if shortcut_mod(m) and name:lower() == "f" then
+        self:openFindDialog()
+        return true
+    end
     if self.reader_mode then
         if left_key(name) or up_key(name) or page_up_key(name) then self:pageLeft()
         elseif right_key(name) or down_key(name) or name == "Space" or name == "space" or name == " "
@@ -4033,7 +4547,6 @@ function MDEdit:onKeyPress(key)
         return true
     end
     local lname = name:lower()
-    local m = key_mods(key)
     if shortcut_mod(m) and #name == 1 then
         self:flushTypeBuffer()
         if lname == "z" then if keymod(m, "Shift") then self:redo() else self:undo() end; return true
@@ -4079,7 +4592,9 @@ function MDEdit:onKeyPress(key)
 end
 function MDEdit:onHold()
     if self.reader_mode then return true end
-    if self.keyboard then self:hideKeyboard() end
+    -- A text-selection drag can briefly be classified as a hold before its pan
+    -- events arrive. Keyboard visibility must not change during that gesture;
+    -- use the deliberate downward swipe or the menu action to hide it instead.
     return true
 end
 function MDEdit:onSwipe(_, ges)
@@ -4088,6 +4603,21 @@ function MDEdit:onSwipe(_, ges)
     if self._pan_mode == "rselect" then
         self._pan_mode = nil
         self:commitHighlightFromSelection()
+        return true
+    end
+    -- Do not create or close the keyboard until this swipe has ended. Showing it
+    -- from onPan places a new keyboard underneath the finger still performing
+    -- the gesture, so its trailing touch-up can be interpreted as a key press.
+    if self._pan_mode == "keyboard_reveal" then
+        if self._pan_reset then UIManager:unschedule(self._pan_reset); self._pan_reset = nil end
+        self._pan_active, self._pan_paged, self._pan_mode = nil, nil, nil
+        self:showKeyboard()
+        return true
+    end
+    if self._pan_mode == "keyboard_hide" then
+        if self._pan_reset then UIManager:unschedule(self._pan_reset); self._pan_reset = nil end
+        self._pan_active, self._pan_paged, self._pan_mode = nil, nil, nil
+        self:hideKeyboard()
         return true
     end
     if self._pan_mode == "select" then self._pan_mode = nil; return true end
@@ -4255,7 +4785,14 @@ function MDEdit:openMindmap()
     UIManager:show(map, "full")
 end
 function MDEdit:runTopAction(name)
-    if name == "menu" then self:openControls()
+    if name == "find_input" then self:openFindDialog()
+    elseif name == "find_previous" then self:findNext(self._find_query, -1)
+    elseif name == "find_next" then self:findNext(self._find_query, 1)
+    elseif name == "find_done" then
+        self._find_bar_visible = nil
+        self._topbar_cache = nil
+        self:refresh{ layout_dirty = false, full = true }
+    elseif name == "menu" then self:openControls()
     elseif name == "edit" then self:setReaderMode(false)
     elseif self.reader_mode and name == "close" then self:saveAndClose()
     elseif self.reader_mode then return
@@ -4276,6 +4813,8 @@ end
 function MDEdit:openControls()
     if self.reader_mode then
         show_controls({
+            { text = "Find...", callback = function() self:openFindDialog() end },
+            { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
             { text = "Exit reader mode", callback = function() self:setReaderMode(false) end },
             { text = "⟲ Rotate screen", callback = function() rotate_screen_ccw() end },
             { text = "Save & close note", callback = function() self:saveAndClose() end },
@@ -4289,6 +4828,8 @@ function MDEdit:openControls()
         keyboard_item = { text = "Show keyboard", callback = function() self:showKeyboard() end }
     end
     show_controls({
+        { text = "Find...", callback = function() self:openFindDialog() end },
+        { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
         { text = "Mindmap mode", callback = function() self:openMindmap() end },
         { text = "Reader mode", callback = function() self:setReaderMode(true) end },
         keyboard_item,
@@ -4324,6 +4865,9 @@ function MDEdit:onTap(_, ges)
         return true
     end
     self._pan_mode = nil
+    -- The native keyboard is non-modal so editor controls remain reachable.
+    -- Never let a key tap also fall through to the document underneath it.
+    if self:isPointInKeyboard(p) then return true end
     if p.y < 95 then                                          -- top bar
         local x = p.x - MDEDIT_PAD
         for name, z in pairs(self.top_zones or {}) do
@@ -4452,6 +4996,10 @@ function MDEdit:onPan(_, ges)
                 self:commitHighlightFromSelection()
                 return
             end
+            -- Keep a selection mode latched until the finger is released:
+            -- otherwise a later pan update can be reclassified as vertical and
+            -- turn the selection gesture into a page scroll.
+            if not self.reader_mode and self._pan_mode == "select" then return end
             self._pan_active = nil
             self._pan_paged = nil
             self._pan_mode = nil
@@ -4462,7 +5010,11 @@ function MDEdit:onPan(_, ges)
     local is_new_pan = not self._pan_active
         or (ges.start_pos and self._pan_start_x
             and (math.abs(sp.x - self._pan_start_x) > 2 or math.abs(sp.y - self._pan_start_y) > 2))
-    if is_new_pan then
+    -- KOReader occasionally reports a slightly different start_pos while the
+    -- same finger is still dragging. Once a drag has become a text selection,
+    -- that must never reset its mode until release: a reset lets the next
+    -- vertical sample take the scroll branch.
+    if is_new_pan and self._pan_mode ~= "select" then
         self._pan_active = true
         self._pan_start_x, self._pan_start_y = sp.x, sp.y
         self._pan_mode, self._pan_last_y, self._pan_paged = nil, sp.y, false
@@ -4508,15 +5060,13 @@ function MDEdit:onPan(_, ges)
     local adx, ady = math.abs(dx), math.abs(dy)
     if self._pan_mode == "keyboard" then return true end
     if self:isKeyboardRevealGesture(ges) then
-        self._pan_mode = "keyboard"
+        self._pan_mode = "keyboard_reveal"
         self._pan_paged = true
-        self:showKeyboard()
         return true
     end
     if self:isKeyboardHideGesture(ges) then
-        self._pan_mode = "keyboard"
+        self._pan_mode = "keyboard_hide"
         self._pan_paged = true
-        self:hideKeyboard()
         return true
     end
     if not self._pan_mode then
@@ -4558,6 +5108,11 @@ function MDEdit:onPanRelease(_, ges)
     if self.reader_mode and self._pan_mode == "rselect" then
         self._pan_mode = nil
         self:commitHighlightFromSelection()
+        return true
+    end
+    if self._pan_mode == "select" then
+        if self._pan_reset then UIManager:unschedule(self._pan_reset); self._pan_reset = nil end
+        self._pan_active, self._pan_paged, self._pan_mode = nil, nil, nil
         return true
     end
     return false   -- let other handlers (movable dialogs, etc.) see non-select releases
@@ -4651,6 +5206,7 @@ end
 
 -- ============================ Minfolio (native KOReader) ============================
 local function edit_note(path, remote)
+    MinfolioPair.trace("edit-request", "path=", tostring(path), "remote=", remote and "yes" or "no")
     fl_restore_if_needed()
     if active_mdedit and not active_mdedit._closing then
         -- Already editing this exact file: keep the live editor (with its cursor
@@ -4670,6 +5226,7 @@ local function edit_note(path, remote)
     end }
     active_mdedit = ed
     UIManager:show(ed, "full")   -- "full" forces a complete repaint over the menu
+    MinfolioPair.trace("editor-shown", "path=", tostring(path))
     -- Closing the file browser and showing the editor each queue their own dirty
     -- updates.  Reassert the editor after that transition has drained so a
     -- browser-region update cannot win and leave a partially blank launch view.
@@ -4723,7 +5280,7 @@ rotate_screen_ccw = function()
     -- every widget in the stack (including ones sitting hidden underneath
     -- another, e.g. the file list behind an open note), not just the one on
     -- top, so nothing is left showing a layout built for the old dimensions.
-    UIManager:broadcastEvent(Event:new("ScreenResize"))
+    UIManager:broadcastEvent(require("ui/event"):new("ScreenResize"))
 end
 
 local function clean_entry_name(name, add_md_ext)
@@ -5127,6 +5684,7 @@ end
 function Minfolio:openLaunchTarget(target)
     if not target or target == "" then return end
     logger.info("minfolio launch target =", tostring(target))
+    MinfolioPair.trace("launch-target", tostring(target))
     if target == "notes" or target == "open" then
         UIManager:scheduleIn(0.1, open_notes)
     elseif target:match("^edit:") then                  -- open a specific file in the editor
@@ -5144,6 +5702,7 @@ end
 function Minfolio:pollLaunchFlag()
     local target = read_launch_target(LAUNCH_FLAG)
     if target and target ~= "" then
+        MinfolioPair.trace("launch-flag-consumed", tostring(target))
         os.remove(LAUNCH_FLAG)
         self:openLaunchTarget(target)
     end
@@ -5151,11 +5710,13 @@ function Minfolio:pollLaunchFlag()
 end
 
 function Minfolio:onResume()
+    MinfolioPair.trace("plugin-resume")
     -- Both operations wait for the screensaver/framework wake transition to settle.
     FL.scheduleWakeSync()
     schedule_wake_repaint()
 end
 function Minfolio:onSuspend()
+    MinfolioPair.trace("plugin-suspend")
     FL.captureBeforeSuspend()
 end
 
@@ -5165,6 +5726,7 @@ function Minfolio:onDispatcherRegisterActions()
 end
 
 function Minfolio:init()
+    MinfolioPair.trace("plugin-init", "notes_dir=", NOTES_DIR)
     install_keyboard_aliases()
     MinfolioPair.start()
     self:onDispatcherRegisterActions()
