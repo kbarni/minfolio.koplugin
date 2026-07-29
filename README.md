@@ -21,6 +21,9 @@ automatically as ordinary `.md` files you can sync anywhere.
 - **Tables** — write pipe tables and edit cells directly in a rendered reader view.
 - **Reader mode** — flip from editing to a clean, fully rendered view of your document.
 - **Mindmap mode** — view the same `.md` as a native Kindle tree, select branches, zoom, add/delete nodes, undo, reorder siblings, and reattach branches.
+- **Find** — search the document from a compact find bar (or Ctrl-F) with Previous/Next and a match counter.
+- **Outline** — jump straight to any heading from a nested list of the document's structure.
+- **Picks up where you left off** — reopening a note restores the passage you were reading, your cursor, and whether you were in reader mode.
 - **Real editing** — overlay caret, word wrap, undo/redo, selection, and copy/paste.
 - **Type your way** — on-screen keyboard or a paired Bluetooth keyboard.
 - **Adjustable text size** — A−/A+ zoom for comfortable writing.
@@ -94,12 +97,14 @@ KOReader UI loop.
 | `minfolio.koplugin/config.example.lua` | Optional local config template. |
 | `minfolio.koplugin/minfolio_sync.*` | Isolated, pinned-TLS worker used only during an active desktop editing session. |
 | `minfolio-kual/` | KUAL launcher: `config.xml`, `menu.json`, `bin/notes.sh`. |
-| `scripts/deploy.sh` | Developer helper: parse-check and copy the plugin to a Kindle. |
+| `scripts/deploy.sh` | Developer helper: copy the plugin to a Kindle over SSH and parse-check it there. |
 
 ## Development
 
-Deploy over SSH (`ssh kindle`, or `kindle.local`): parse-check with the device's own LuaJIT and `scp`
-the plugin and isolated sync worker to the device. Restart KOReader manually when you are ready. See `scripts/deploy.sh`.
+`scripts/deploy.sh [ssh-host]` copies the plugin and isolated sync worker to the device, then
+parse-checks both with the device's own LuaJIT. The argument is an ssh(1) host, so a plain
+`Host kindle` block in `~/.ssh/config` is all the setup required (it defaults to `kindle`). Restart
+KOReader manually when you are ready.
 
 A Lua syntax error makes KOReader silently skip the whole plugin, so always parse-check before trusting
 a deploy:
