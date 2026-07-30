@@ -6,12 +6,16 @@ the finding-by-finding response.
 
 ## 1. Why
 
-`minfolio.koplugin/main.lua` is 5,755 lines and declares 198 top-level `local`
-variables. LuaJIT allows 200 named locals per function scope; a Lua file is itself
-a function, so the file's top level shares one budget of 200.
+`minfolio.koplugin/main.lua` is 5,755 lines and contains 198 top-level `local`
+*statements* declaring **200 local names** — line 917 declares three names in one
+statement. LuaJIT allows 200 named locals per function scope, and a Lua file is
+itself a function, so the file's top level is at the ceiling **exactly**, not two
+short of it.
 
-Verified: appending a single `local __probe = 1` fails to compile with
-`main function has more than 200 local variables`. Zero headroom.
+Verified twice: appending a single `local __probe = 1` fails with `main function
+has more than 200 local variables`, and the idiomatic fix for the `notify` bug
+below — adding one forward declaration — was itself impossible for the same
+reason. The codebase can no longer accept the correct fix to its own defects.
 
 KOReader silently skips a plugin whose Lua fails to compile — no dialog, nothing
 the user sees. So the failure mode for adding one top-level `local` is "Minfolio
@@ -21,7 +25,7 @@ The limit is already distorting the design, and the source says so. The comment 
 main.lua:72–75 explains that `MinfolioPair` hosts `trace()`,
 `makeKeyboardArrowFree()`, and `disableKeyboardKeyFlash()` — none of which are
 pairing concerns — because table fields do not consume local slots. Six values are
-outright globals (§6.4) for the same reason. 60 of the 198 locals are constants.
+outright globals (§6.4) for the same reason. 60 of the 200 names are constants.
 
 ## 2. Goals and non-goals
 
@@ -47,7 +51,7 @@ outright globals (§6.4) for the same reason. 60 of the 198 locals are constants
 
 | Constraint | Evidence |
 |---|---|
-| 200 locals/scope; 198 used; zero headroom | probe compile fails at +1 |
+| 200 locals/scope; 200 names used (198 statements); zero headroom | probe compile fails at +1; a one-name forward decl also fails |
 | KOReader puts a plugin's dir on `package.path`; bare `require("sibling")` works | `kinbox.koplugin` (~18 non-test modules, 8,131 lines, same device) uses `require("kinbox_store")`; `kshell` uses `require("restart_flag")` |
 | The Lua module namespace is shared across all installed plugins | one `package.path`/`package.loaded`; hence kinbox's `kinbox_*` prefix |
 | A compile failure silently disables the whole plugin | `README.md`, `RELEASE_CHECKLIST.md` |
@@ -111,7 +115,7 @@ stops working forever, with no error anywhere.
 **Other corrections to v1's inventory:**
 
 - Constants are **60** (`MDEDIT_*` ×33, `MINDMAP_*` ×27), not 57.
-- Nine are **computed at load time** from KOReader: `Blitbuffer.Color8(190)` (972),
+- Ten are **computed at load time** from KOReader: `Blitbuffer.Color8(190)` (972),
   `Size.padding.*` (976–977), `Screen:scaleBySize(...)` (980, 982, 983, 994, 995,
   999, 1000). A "pure constants module" is impossible; it requires KOReader and
   bakes DPI at require time.
@@ -127,7 +131,7 @@ stops working forever, with no error anywhere.
 
 ## 5. Target architecture
 
-~14 modules, flat, `minfolio_`-prefixed. Fewer than v1's 20: the editor drops from
+22 modules (21 plus a slim `main.lua`), flat and `minfolio_`-prefixed. The editor drops from
 8 sub-modules to 4, and thin ceremony modules are merged.
 
 **Tier 0 — KOReader-free (testable off-device)**
@@ -220,7 +224,16 @@ mid-refactor judgement. Unassigned families included all formatting
 assigned module, every cross-boundary plain helper, every forward declaration,
 every global, every computed constant. No extraction starts until it exists and is
 reviewed. Both reviewers independently identified this as the gap that made v1
-unexecutable.
+unexecutable. Delivered as `INVENTORY.md` (226 methods, 63 cross-boundary helpers,
+7 nil-tolerant guard sites, 22 module budget projections).
+
+**`INVENTORY.md`'s line numbers are a snapshot; its assignments are durable.** They
+were derived against `main.lua` at 5,755 lines, before any extraction. The moment
+step 3 moves Tier 0 out, every subsequent line number shifts. Later steps must use
+the inventory for *what goes where* and re-derive line numbers from the current
+file — never carry a line number forward across an extraction. Reading stale line
+numbers as current is the specific error that broke plan v1 twice, and it is the
+easiest way to reintroduce it.
 
 ### 6.2 Mixin assembly, corrected
 
@@ -274,7 +287,11 @@ The severity is not uniform, and the lint should concentrate where it is worst:
   arithmetic-on-nil at first use. Annoying, but self-announcing.
 - **Silent and permanent** — a lost symbol behind a nil-tolerant guard. Every one
   of these must be inventoried before moving: 3962 (`md_split_line_prefix`), 4490
-  (`open_markdown_picker`), 5211/5225 (`active_mdedit`), 3816 (`md_clipboard`).
+  (`open_markdown_picker`), 5211/5265 (`active_mdedit`), 5225
+  (`show_file_manager`), 3816 (`md_clipboard`), and **154
+  (`MinfolioRemote`)** — `local sock = MinfolioRemote and MinfolioRemote.socket(...)`,
+  a global read 1,854 lines before its assignment at 2007. Step 2 must not leave
+  that guard reading nil, or desktop pairing silently stops posting.
   These degrade a feature to a no-op with no error, ever.
 
 Gate: per-module `luajit -bl <file> | grep GGET`, diffed against a per-module
@@ -387,7 +404,7 @@ first gives Kindle edits priority over any remote snapshot"), and `fetch` applie
 snapshot only when `next_revision > revision` (85–89). There is a **second**
 mechanism v1 missed: `MDEdit:checkRemoteInbox` (main.lua:3597) refuses to apply an
 arrived desktop snapshot while the editor is dirty or an outbox exists, and clears
-undo/redo when it does apply (3608).
+undo/redo when it does apply (3607).
 
 The desktop side reportedly does a three-way diff3 merge, prompting only on
 same-line conflicts. **Correction to v1:** I stated that a desktop edit "can be
@@ -437,7 +454,7 @@ Rollback is per-step, one commit each.
 
 | Risk | Mitigation |
 |---|---|
-| A moved function's file-local reference becomes a silent global read | §6.3 GGET diff gate; the nil-tolerant-guard inventory (3962, 4490, 5211, 5225, 3816) gets manual verification, not just lint |
+| A moved function's file-local reference becomes a silent global read | §6.3 GGET diff gate; the nil-tolerant-guard inventory (154, 3816, 3962, 4490, 5211, 5225, 5265) gets manual verification, not just lint |
 | Partial `scp` leaves mixed-version modules that parse but misbehave | step 1, before any split |
 | Module name collides in the shared plugin namespace | mandatory `minfolio_` prefix; grep kshell/kinbox/hidpassthrough before adding a name |
 | Mixin assembly rejects a legitimate inherited override | `rawget`, §6.2 |
@@ -495,8 +512,8 @@ before accepting it. Codex: **rework**. Fable: **proceed with changes**.
 | Constants are 60 not 57; 9 computed from KOReader; EDIT/MAP not clean | Fable | yes (972, 976–977, 980–1000; 979, 1277, 1565–1589) | §4, §5 `minfolio_const` |
 | `MDEdit` has no `paintTo` | Fable | yes | removed |
 | Migration order unsafe: tooling last, remote before controller | both | yes | reordered, §10 |
-| ~20 modules / 8-way editor split is over-engineered | Codex | partly — Fable measured kinbox at 8,131 lines / ~18 modules, so the *count* is calibrated; both agree the *editor* split was the problem | ~14 modules; editor 8 → 4 |
+| ~20 modules / 8-way editor split is over-engineered | Codex | partly — Fable measured kinbox at 8,131 lines / ~18 modules, so the *count* is calibrated; both agree the *editor* split was the problem | 22 modules enumerated below; editor 8 → 4 |
 | `minfolio_session` is ceremony | Codex | agreed as specced in v1 | promoted to a real controller (`minfolio_app`), which is also Fable's fix for the tangle |
 | kinbox has no mixin-assembled class; precedent overstated | Fable | yes | §3 states the mixin approach is novel here |
-| §9.2 desktop-discard claim unverified; second mechanism missed | Fable | yes (3597, 3608) | softened to an open question; `checkRemoteInbox` documented |
+| §9.2 desktop-discard claim unverified; second mechanism missed | Fable | yes (3597, 3607) | softened to an open question; `checkRemoteInbox` documented |
 | Reviewer disagreement on module count | — | — | adjudicated above in favour of Fable's measured precedent, with Codex's editor critique adopted in full |
