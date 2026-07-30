@@ -56,6 +56,11 @@ local MindmapView = require("minfolio_map_view")
 -- actually runs. minfolio_edit_tables/minfolio_edit_view expose no plain fns,
 -- so the assembly loop below requires them inline.
 local free_wrap_entry = require("minfolio_edit_layout").fns.freeWrapEntry
+-- Assert at load rather than discovering it at close time. Binding a wrong
+-- path yields nil silently, which is exactly how the original defect here
+-- survived a deploy; a load-time failure is at least caught by deploy.sh's
+-- plugin-init check instead of waiting for a user to close a note.
+assert(free_wrap_entry, "minfolio_edit_layout.fns.freeWrapEntry missing")
 
 local md_clipboard = ""               -- shared across notes
 local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true }
