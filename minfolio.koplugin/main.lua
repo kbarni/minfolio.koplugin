@@ -44,77 +44,15 @@ local IO = require("minfolio_io")
 local State = require("minfolio_state")
 local Style = require("minfolio_style")
 local C = require("minfolio_const")
+local Keys = require("minfolio_keys")
+local Frontlight = require("minfolio_frontlight")
+-- The original FL table (state plus its captureBeforeSuspend/scheduleWakeSync
+-- methods) is a field of the module, so bind it directly and every existing
+-- FL.xxx call site keeps working untouched.
+local FL = Frontlight.FL
+local Chrome = require("minfolio_chrome")
 
 MinfolioPair = { port = 42771 }
--- Keep lifecycle evidence in KOReader's crash log without making the normal
--- editor path noisy.  These markers make a silent UI-loop stall distinguishable
--- from a clean KOReader exit after the next incident.  This is a table method
--- rather than a local because the plugin is at LuaJIT's local-variable limit.
-function MinfolioPair.trace(event, ...)
-    logger.info("minfolio trace", event, ...)
-end
-
--- KOReader's stock English keyboard devotes two bottom-row cells to cursor
--- arrows (and exposes up/down on the symbol layers of N and M).  They are easy
--- to hit accidentally in a compact editor, so make an app-local copy with no
--- arrow actions.  Do not mutate the shared layout module: other KOReader views
--- should retain their normal keyboard.
-function MinfolioPair.makeKeyboardArrowFree(keyboard)
-    local rows, removed = {}, 0
-    for _, row in ipairs(keyboard.KEYS or {}) do
-        local new_row = {}
-        for _, keydef in ipairs(row) do
-            local label = type(keydef) == "table" and keydef.label or keydef
-            if label == "←" or label == "→" or label == "↑" or label == "↓" then
-                removed = removed + 1
-            else
-                local copy = {}
-                if type(keydef) == "table" then
-                    for k, v in pairs(keydef) do copy[k] = v end
-                    -- N/M use arrows only in the alternate layers.  Retain the
-                    -- character rather than leaving an invisible, active key.
-                    for k, v in ipairs(copy) do
-                        if v == "↑" or v == "↓" or v == "←" or v == "→" then
-                            copy[k] = copy[2] or copy[1] or ""
-                        end
-                    end
-                else
-                    copy = keydef
-                end
-                table.insert(new_row, copy)
-            end
-        end
-        table.insert(rows, new_row)
-    end
-    if removed == 0 then return end
-    -- On the English layout this exactly fills the two removed bottom-row cells.
-    local last_row = rows[#rows]
-    for _, keydef in ipairs(last_row or {}) do
-        if type(keydef) == "table" and keydef.label == "_" then
-            keydef.width = (tonumber(keydef.width) or 1) + removed
-            break
-        end
-    end
-    keyboard.KEYS = rows
-    keyboard:initLayer(keyboard.keyboard_layer)
-end
-
-function MinfolioPair.disableKeyboardKeyFlash(keyboard)
-    -- VirtualKey normally calls forceRePaint() and yieldToEPDC() for every tap
-    -- when the global setting is absent (its default is enabled).  On e-ink that
-    -- synchronous wait prevents the touch queue from keeping up with fast typing.
-    -- Keep this local to Minfolio and reapply it whenever Shift/Symbol rebuilds
-    -- the key widgets.
-    local stock_init_layer = keyboard.initLayer
-    function keyboard:initLayer(layer)
-        stock_init_layer(self, layer)
-        for _, row in ipairs(self.layout or {}) do
-            for _, key in ipairs(row) do key.flash_keyboard = false end
-        end
-    end
-    keyboard:initLayer(keyboard.keyboard_layer)
-end
-
 function MinfolioPair.deviceId()
     local f = io.open("/proc/usid", "r")
     local id = f and f:read("*l") or nil
@@ -144,8 +82,8 @@ function MinfolioPair.showPrompt(msg)
             lfs.mkdir(Config.STATE_DIR)
             local state = io.open(Config.MINFOLIO_PAIR_PATH, "w")
             if state then state:write(string.format("return { secret = %q }\n", secret)); state:close() end
-            UIManager:show(Notification:new{ text = _("Desktop paired"), timeout = 3 })
-        else UIManager:show(Notification:new{ text = _("Could not complete secure pairing"), timeout = 3 }) end
+            Chrome.notify(_("Desktop paired"))
+        else Chrome.notify(_("Could not complete secure pairing")) end
     end })
 end
 function MinfolioPair.pollRequest()
@@ -191,354 +129,14 @@ function MinfolioPair.start()
     if MinfolioPair.sock then return end
     local s = socket.udp(); if not s then return end
     s:setsockname("*", MinfolioPair.port); s:setoption("broadcast", true); s:settimeout(0); MinfolioPair.sock = s
-    MinfolioPair.trace("discovery-start", "port=", MinfolioPair.port)
+    Chrome.trace("discovery-start", "port=", MinfolioPair.port)
     local function tick() MinfolioPair.poll(); MinfolioPair.pollRequest(); MinfolioPair.beacon(); UIManager:scheduleIn(0.75, tick) end
     UIManager:scheduleIn(0.25, tick)
 end
-local function status_date_text()
-    return os.date("%a, %d %b  %I:%M %p")
-end
-local function status_time_text()
-    return os.date("%I:%M %p")
-end
-MinfolioBattery = MinfolioBattery or {}
-MinfolioBattery.refresh_interval = MinfolioBattery.refresh_interval or 60
-local function battery_status_text()
-    local ok, pd = pcall(function() return Device:getPowerDevice() end)
-    if ok and pd then
-        local cap = pd:getCapacity()
-        if cap then return tostring(cap) .. "%" end
-    end
-    return ""
-end
-local function battery_info()
-    local ok, pd = pcall(function() return Device:getPowerDevice() end)
-    if not (ok and pd and pd.getCapacity) then return nil end
-    local cap = pd:getCapacity()
-    if not cap then return nil end
-    local charging = false
-    local cok, c = pcall(function() return pd:isCharging() end)
-    if cok then charging = not not c end
-    return { cap = math.max(0, math.min(100, math.floor(cap))), charging = charging }
-end
-function MinfolioBattery.infoKey(info)
-    if not info then return "" end
-    return tostring(info.cap) .. ":" .. (info.charging and "1" or "0")
-end
-function MinfolioBattery.indicatorWidth()
-    local bs = function(px) return Screen:scaleBySize(px) end
-    local pct = TextWidget:new{ text = "100%", face = Font:getFace("cfont", 17), fgcolor = Blitbuffer.COLOR_BLACK }
-    local w = bs(22) + bs(3) + bs(5) + pct:getSize().w
-    pct:free()
-    return w
-end
--- A hand-drawn Kindle-style battery pill (outline + proportional fill + nub) with
--- the percentage beside it. Drawn from primitives so it never depends on an icon
--- font/asset being present, and stays crisp at the device DPI.
-local function battery_indicator(info)
-    info = info or battery_info()
-    if not info then return nil end
-    local bs = function(px) return Screen:scaleBySize(px) end
-    local bw, bh, pad = bs(22), bs(13), bs(1)
-    local inner_w = bw - 2 * (1 + pad)
-    local inner_h = bh - 2 * (1 + pad)
-    local fill_w = info.charging and inner_w or math.max(0, math.min(inner_w, math.floor(inner_w * info.cap / 100)))
-    local fill = HorizontalGroup:new{ align = "top" }
-    if fill_w > 0 then
-        fill[#fill+1] = LineWidget:new{ background = Blitbuffer.COLOR_BLACK, dimen = Geom:new{ w = fill_w, h = inner_h } }
-    end
-    if inner_w - fill_w > 0 then
-        fill[#fill+1] = LineWidget:new{ background = Blitbuffer.Color8(215), dimen = Geom:new{ w = inner_w - fill_w, h = inner_h } }
-    end
-    local body = FrameContainer:new{ bordersize = 1, radius = bs(2), padding = pad, margin = 0,
-        width = bw, height = bh, fill }
-    local nub = CenterContainer:new{ dimen = Geom:new{ w = bs(3), h = bh },
-        LineWidget:new{ background = Blitbuffer.COLOR_BLACK, dimen = Geom:new{ w = bs(2), h = bs(6) } } }
-    local pct = TextWidget:new{ text = tostring(info.cap) .. "%",
-        face = Font:getFace("cfont", 17), fgcolor = Blitbuffer.COLOR_BLACK }
-    return HorizontalGroup:new{ align = "center", body, nub, HorizontalSpan:new{ width = bs(5) }, pct }
-end
-local function read_frontlight_state()
-    local ok, state = pcall(dofile, Config.FL_STATE_PATH)
-    return (ok and type(state) == "table") and state or {}
-end
-local FL
-local function save_frontlight_state()
-    lfs.mkdir(Config.STATE_DIR)
-    IO.write_file(Config.FL_STATE_PATH, string.format(
-        "return { on = %s, bright = %d, last = %d, amber = %d }\n",
-        FL.on and "true" or "false",
-        math.floor(FL.bright or 0),
-        math.floor(FL.last or 0),
-        math.floor(FL.amber or 0)
-    ))
-end
--- Frontlight is driven through the Kindle framework's powerd (lipc) -- the same
--- controller the OS uses: flIntensity = brightness, currentAmberLevel = warmth.
--- Going through the framework (instead of writing the fp9966 sysfs banks behind
--- its back) means our changes persist across wakes and behave like the native
--- controls: no dual-controller fights, no self-relighting, no warmth drift, and
--- warmth no longer changes the brightness number.
-local function lipc_get(prop)
-    local h = io.popen("lipc-get-prop com.lab126.powerd " .. prop .. " 2>/dev/null")
-    if not h then return nil end
-    local v = h:read("*l"); h:close()
-    return tonumber(v)
-end
-local function lipc_set(prop, v)
-    os.execute("lipc-set-prop com.lab126.powerd " .. prop .. " " .. math.floor(v) .. " >/dev/null 2>&1")
-end
-local FL_MAX = lipc_get("flMaxIntensity") or 24
-local FL_AMBER_MAX = 24
-local FL_HAS_AMBER = lipc_get("currentAmberLevel") ~= nil
-local FL_STEP = math.max(1, math.floor(FL_MAX / 8))
-local FL_AMBER_STEP = math.max(1, math.floor(FL_AMBER_MAX / 6))
-local FL_BRIGHT_NOW = lipc_get("flIntensity") or 0
-local FL_AMBER_NOW = lipc_get("currentAmberLevel") or 0
-local FL_SAVED = read_frontlight_state()
-FL = {
-    bright = FL_BRIGHT_NOW,
-    amber  = FL_AMBER_NOW,
-    last   = FL_BRIGHT_NOW > 0 and FL_BRIGHT_NOW
-        or (tonumber(FL_SAVED.last or FL_SAVED.bright) or math.floor(FL_MAX / 2)),
-    on     = FL_BRIGHT_NOW > 0,
-}
-local function fl_apply()
-    local b = math.max(0, math.min(FL_MAX, FL.bright))
-    lipc_set("flIntensity", b)
-    if FL_HAS_AMBER then lipc_set("currentAmberLevel", math.max(0, math.min(FL_AMBER_MAX, FL.amber))) end
-    FL.on = b > 0
-    if b > 0 then FL.last = b end
-    save_frontlight_state()
-end
--- The framework owns the light and persists it across wakes, so there is nothing
--- to "restore" -- just resync our view (for the Light off/on label) from the
--- framework without changing the hardware.
-local function fl_restore_if_needed()
-    local b = lipc_get("flIntensity")
-    if b then FL.bright = b; FL.on = b > 0; if b > 0 then FL.last = b end end
-    if FL_HAS_AMBER then local a = lipc_get("currentAmberLevel"); if a then FL.amber = a end end
-end
-function FL.captureBeforeSuspend()
-    if FL.wake_pending then
-        UIManager:unschedule(FL.wake_pending)
-        FL.wake_pending = nil
-        FL.before_suspend = nil
-    end
-    if FL.before_suspend then return end
-    fl_restore_if_needed()
-    FL.before_suspend = {
-        on = FL.on, bright = FL.bright, last = FL.last, amber = FL.amber,
-    }
-    save_frontlight_state()
-end
-function FL.scheduleWakeSync()
-    if FL.wake_pending then return end
-    local expected = FL.before_suspend
-    local fn
-    fn = function()
-        if FL.wake_pending == fn then FL.wake_pending = nil end
-        FL.before_suspend = nil
-        if expected then
-            -- powerd may still report its transient wake value during onResume.
-            -- Restore the state captured immediately before suspend only after the
-            -- Kindle framework has finished its own wake transition.
-            FL.on = expected.on
-            FL.bright = expected.on and expected.bright or 0
-            FL.last = expected.last
-            FL.amber = expected.amber
-            fl_apply()
-        else
-            -- A resume without a matching suspend (plugin loaded mid-session): do
-            -- not impose stale saved settings; just learn the settled hardware state.
-            fl_restore_if_needed()
-        end
-    end
-    FL.wake_pending = fn
-    UIManager:scheduleIn(1.1, fn)
-end
-local function fl_adjust(db, da)
-    if db and db ~= 0 then
-        FL.bright = math.max(0, math.min(FL_MAX, FL.bright + db))
-        if FL.bright > 0 then FL.last = FL.bright end
-    end
-    if da and da ~= 0 and FL_HAS_AMBER then
-        FL.amber = math.max(0, math.min(FL_AMBER_MAX, FL.amber + da))
-    end
-    fl_apply()
-end
-local function toggle_light()
-    if FL.bright > 0 then
-        FL.last = FL.bright
-        FL.bright = 0
-    else
-        FL.bright = (FL.last and FL.last > 0) and FL.last or math.floor(FL_MAX / 2)
-    end
-    fl_apply()
-end
--- shared controls menu (frontlight brightness/warmth + per-app extras), reused across mirror / notes / launcher
-local function show_controls(extra, on_close)
-    local items = {
-        { text = "Brightness +",  keep = true, callback = function() fl_adjust(FL_STEP, 0) end },
-        { text = "Brightness -",  keep = true, callback = function() fl_adjust(-FL_STEP, 0) end },
-        { text = FL.bright > 0 and "Light off" or "Light on", callback = toggle_light },
-    }
-    if FL_HAS_AMBER then
-        table.insert(items, 3, { text = "Warmth +", keep = true, callback = function() fl_adjust(0, FL_AMBER_STEP) end })
-        table.insert(items, 4, { text = "Warmth -", keep = true, callback = function() fl_adjust(0, -FL_AMBER_STEP) end })
-    end
-    for _, it in ipairs(extra or {}) do items[#items+1] = it end
-    local menu
-    local closed_by_select = false
-    menu = Menu:new{
-        title = "Controls", item_table = items, is_popout = true,
-        width = math.floor(Screen:getWidth() * 0.72), height = math.floor(Screen:getHeight() * 0.7),
-        onMenuSelect = function(_s, item)
-            local sub_items = item.sub_item_table
-            if not sub_items and item.sub_item_table_func then sub_items = item.sub_item_table_func() end
-            if sub_items ~= nil then
-                sub_items.title = menu.title
-                table.insert(menu.item_table_stack, menu.item_table)
-                menu:switchItemTable(item.text, sub_items)
-                return true
-            end
-            if item.keep then
-                if item.callback then item.callback() end
-                return
-            end
-            closed_by_select = true
-            UIManager:close(menu)
-            if on_close then on_close() end
-            if item.callback then UIManager:scheduleIn(0.01, item.callback) end
-        end,
-        close_callback = function() if not closed_by_select and on_close then on_close() end end,
-    }
-    UIManager:show(menu)
-    return menu
-end
 
 -- ============================ Live styled markdown editor (Phase 1) ============================
--- Shift map for BT-keyboard symbol keys (used by MDEdit:onKeyPress).
-local SHIFT_SYM = {
-    ["1"]="!", ["2"]="@", ["3"]="#", ["4"]="$", ["5"]="%", ["6"]="^", ["7"]="&", ["8"]="*", ["9"]="(", ["0"]=")",
-    ["-"]="_", ["="]="+", ["["]="{", ["]"]="}", ["\\"]="|", [";"]=":", ["'"]='"', [","]="<", ["."]=">", ["/"]="?", ["`"]="~",
-}
-local KEYPAD_CHAR = {
-    KP0 = "0", KP1 = "1", KP2 = "2", KP3 = "3", KP4 = "4", KP5 = "5", KP6 = "6", KP7 = "7", KP8 = "8", KP9 = "9",
-    KPMinus = "-", KPPlus = "+", KPDot = ".",
-}
-local KEYBOARD_EVENT_MAP = {
-    [1]="Back", [2]="1", [3]="2", [4]="3", [5]="4", [6]="5", [7]="6", [8]="7", [9]="8", [10]="9", [11]="0",
-    [12]="-", [13]="=", [14]="Backspace", [15]="Tab",
-    [16]="Q", [17]="W", [18]="E", [19]="R", [20]="T", [21]="Y", [22]="U", [23]="I", [24]="O", [25]="P",
-    [26]="[", [27]="]", [28]="Press", [29]="Ctrl",
-    [30]="A", [31]="S", [32]="D", [33]="F", [34]="G", [35]="H", [36]="J", [37]="K", [38]="L", [39]=";", [40]="'",
-    [41]="`", [42]="Shift", [43]="\\",
-    [44]="Z", [45]="X", [46]="C", [47]="V", [48]="B", [49]="N", [50]="M", [51]=",", [52]=".", [53]="/",
-    [54]="Shift", [56]="Alt", [57]=" ", [58]="CapsLock",
-    [59]="F1", [60]="F2", [61]="F3", [62]="F4", [63]="F5", [64]="F6", [65]="F7", [66]="F8", [67]="F9", [68]="F10",
-    [69]="NumLock", [70]="ScrollLock",
-    [71]="KP7", [72]="KP8", [73]="KP9", [74]="KPMinus", [75]="KP4", [76]="KP5", [77]="KP6", [78]="KPPlus",
-    [79]="KP1", [80]="KP2", [81]="KP3", [82]="KP0", [83]="KPDot", [87]="F11", [88]="F12", [96]="Press",
-    [97]="Ctrl", [98]="Home", [99]="PrintScr", [100]="Alt", [102]="Home", [103]="Up", [104]="PageUp",
-    [105]="Left", [106]="Right", [107]="End", [108]="Down", [109]="PageDown", [110]="Ins", [111]="Del",
-    [114]="VMinus", [115]="VPlus", [116]="Power", [119]="Pause", [125]="Meta", [126]="Meta", [127]="Menu", [139]="Menu",
-}
-local function keymod(mods, name)
-    if not mods then return nil end
-    if type(mods) == "string" then
-        return mods == name or mods:lower() == name:lower()
-    end
-    if mods[name] or mods[name:lower()] or mods[name:upper()] then return true end
-    if name == "Ctrl" then return mods.LCtrl or mods.RCtrl end
-    if name == "Alt" then return mods.LAlt or mods.RAlt end
-    if name == "Meta" then return mods.LMeta or mods.RMeta end
-    if name == "Shift" then return mods.LShift or mods.RShift end
-    for _, mod in pairs(mods) do
-        if type(mod) == "string" and (mod == name or mod:lower() == name:lower()) then return true end
-    end
-    return nil
-end
-local function shortcut_mod(mods)
-    return keymod(mods, "Ctrl") or keymod(mods, "Meta") or keymod(mods, "Cmd")
-        or keymod(mods, "Command") or keymod(mods, "Gui") or keymod(mods, "Super")
-end
-local function word_key_mod(mods)
-    return keymod(mods, "Alt") or shortcut_mod(mods)
-end
-local function fn_key_mod(mods)
-    return keymod(mods, "Fn") or keymod(mods, "Function") or keymod(mods, "Mod5")
-end
-local function key_mods(key)
-    local out = {}
-    if Device.input and type(Device.input.modifiers) == "table" then
-        for k, v in pairs(Device.input.modifiers) do out[k] = v end
-    end
-    if key and type(key.modifiers) == "table" then
-        for k, v in pairs(key.modifiers) do out[k] = v end
-    end
-    if key then
-        for _, name in ipairs({
-            "Shift", "LShift", "RShift",
-            "Ctrl", "LCtrl", "RCtrl",
-            "Alt", "LAlt", "RAlt",
-            "Meta", "LMeta", "RMeta",
-            "Cmd", "Command", "Gui", "Super",
-            "Fn", "Function", "Mod5",
-        }) do
-            if key[name] then out[name] = true end
-        end
-    end
-    return out
-end
-local function install_keyboard_aliases()
-    local input = Device.input
-    if not input then return end
-    local em = input.event_map
-    if em then
-        for code, name in pairs(KEYBOARD_EVENT_MAP) do
-            em[code] = name
-        end
-    end
-    local mods = input.modifiers
-    if mods then
-        mods.Alt = mods.Alt or false
-        mods.Ctrl = mods.Ctrl or false
-        mods.Shift = mods.Shift or false
-        mods.Meta = mods.Meta or false
-        mods.LAlt = mods.LAlt or false
-        mods.RAlt = mods.RAlt or false
-        mods.LCtrl = mods.LCtrl or false
-        mods.RCtrl = mods.RCtrl or false
-        mods.LShift = mods.LShift or false
-        mods.RShift = mods.RShift or false
-        mods.LMeta = mods.LMeta or false
-        mods.RMeta = mods.RMeta or false
-        mods.Fn = mods.Fn or false
-        mods.Function = mods.Function or false
-        mods.Mod5 = mods.Mod5 or false
-    end
-end
-local function page_up_key(name)
-    return name == "PageUp" or name == "Page_Up" or name == "PgUp" or name == "Prior"
-end
-local function page_down_key(name)
-    return name == "PageDown" or name == "Page_Down" or name == "PgDown" or name == "Next"
-end
-local function left_key(name)
-    return name == "Left" or name == "ArrowLeft" or name == "KEY_LEFT" or name == "CursorLeft"
-end
-local function right_key(name)
-    return name == "Right" or name == "ArrowRight" or name == "KEY_RIGHT" or name == "CursorRight"
-end
-local function up_key(name)
-    return name == "Up" or name == "ArrowUp" or name == "KEY_UP" or name == "CursorUp"
-end
-local function down_key(name)
-    return name == "Down" or name == "ArrowDown" or name == "KEY_DOWN" or name == "CursorDown"
-end
 local md_clipboard = ""               -- shared across notes
-local open_markdown_picker, rotate_screen_ccw, show_file_manager   -- fwd decls
+local open_markdown_picker, show_file_manager   -- fwd decls
 -- Only ever one editor at a time. Opening a note while another editor is live
 -- (e.g. a re-send via kindle-send, or a duplicate launch-flag write) must not
 -- stack a second MDEdit on the same file: both keep polling the file and each
@@ -546,18 +144,6 @@ local open_markdown_picker, rotate_screen_ccw, show_file_manager   -- fwd decls
 -- "Reloaded from disk" storm and a half-repainted screen. edit_note() enforces
 -- the singleton; MDEdit clears it on close.
 local active_mdedit
-local function notify(text)
-    UIManager:show(Notification:new{ text = text, timeout = 3 })
-end
-local wake_repaint_pending = false
-local function schedule_wake_repaint()
-    if wake_repaint_pending then return end
-    wake_repaint_pending = true
-    UIManager:scheduleIn(1.0, function()
-        wake_repaint_pending = false
-        UIManager:setDirty("all", "full")
-    end)
-end
 
 -- ============================ Native Markdown mindmap ============================
 -- Tree parsing/model moved to minfolio_map_model.lua (PLAN.md §5 Tier 0); this file now only
@@ -877,8 +463,8 @@ function MindmapView:showMapKeyboard()
     if self.keyboard or not Device:isTouchDevice() then return end
     local VirtualKeyboard = require("ui/widget/virtualkeyboard")
     local keyboard = VirtualKeyboard:new{ inputbox = self }
-    MinfolioPair.makeKeyboardArrowFree(keyboard)
-    MinfolioPair.disableKeyboardKeyFlash(keyboard)
+    Keys.makeKeyboardArrowFree(keyboard)
+    Keys.disableKeyboardKeyFlash(keyboard)
     keyboard.modal = false
     self.keyboard = keyboard
     local map, original_close = self, keyboard.onCloseWidget
@@ -1117,7 +703,7 @@ end
 
 function MindmapView:undo()
     local snap = self._undo and table.remove(self._undo)
-    if not snap or not self.editor then return notify(_("Nothing to undo")) end
+    if not snap or not self.editor then return Chrome.notify(_("Nothing to undo")) end
     self.editor.lines = Text.split_text_lines(snap.text or "")
     self.editor._vrows_dirty = true
     self.editor:save()
@@ -1217,7 +803,7 @@ end
 
 function MindmapView:moveSibling(dir)
     local other = self:siblingRange(self.selected, dir)
-    if not other or not self.editor then return notify(_("No sibling there")) end
+    if not other or not self.editor then return Chrome.notify(_("No sibling there")) end
     local a1, a2 = self:rangeFor(self.selected)
     local b1, b2 = self:rangeFor(other)
     local lines = Text.split_text_lines(self.editor:currentText())
@@ -1250,9 +836,9 @@ function MindmapView:reattach(dir)
     local line = lines[first] or ""
     local kind, level = self:lineKind(line)
     if dir < 0 and ((kind == "heading" and level <= 1) or (kind == "list" and level <= 0) or kind == "paragraph") then
-        return notify(_("Cannot outdent this node"))
+        return Chrome.notify(_("Cannot outdent this node"))
     end
-    if dir > 0 and kind == "heading" and level >= 6 then return notify(_("Heading is already deepest")) end
+    if dir > 0 and kind == "heading" and level >= 6 then return Chrome.notify(_("Heading is already deepest")) end
     self:snapshot()
     self:adjustRangeDepth(lines, first, finish, dir)
     self:applyLines(lines, first)
@@ -1273,7 +859,7 @@ function MindmapView:saveAndClose()
 end
 
 function MindmapView:openControls()
-    show_controls({
+    Chrome.show_controls({
         { text = "Back to editor", callback = function() self:close() end },
         { text = "Edit selected node", callback = function()
             local entry = self:selectedEntry()
@@ -1297,7 +883,7 @@ function MindmapView:openControls()
             if self.editor then self.editor:bumpScale(-0.1); self.scale = self.editor.scale end
             self:refresh()
         end },
-        { text = "⟲ Rotate screen", callback = function() rotate_screen_ccw() end },
+        { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
     }, function() self:refresh() end)
 end
 
@@ -1415,7 +1001,7 @@ end
 function MindmapView:onKeyPress(key)
     local name = key and key.key
     if not name then return true end
-    local mods = key_mods(key)
+    local mods = Keys.key_mods(key)
     if self.editing_index then
         if name == "Backspace" or name == "BackSpace" then self:delChar()
         elseif name == "Left" then self:leftChar()
@@ -1424,22 +1010,22 @@ function MindmapView:onKeyPress(key)
         elseif name == "End" then self:goToEndOfLine()
         elseif name == "Press" or name == "Return" or name == "Enter" then self:commitNodeEdit()
         elseif name == "Back" or name == "Esc" or name == "Escape" then self:cancelNodeEdit()
-        elseif not shortcut_mod(mods) and #tostring(name) == 1 then self:addChars(name) end
+        elseif not Keys.shortcut_mod(mods) and #tostring(name) == 1 then self:addChars(name) end
         return true
     end
-    if up_key(name) then
+    if Keys.up_key(name) then
         self.selected = math.max(1, (self.selected or 1) - 1); self:centerSelected(); self:refresh()
-    elseif down_key(name) then
+    elseif Keys.down_key(name) then
         self.selected = math.min(#self.rows, (self.selected or 1) + 1); self:centerSelected(); self:refresh()
-    elseif left_key(name) then self:reattach(-1)
-    elseif right_key(name) then self:reattach(1)
-    elseif page_up_key(name) then self:zoomAt(nil, 0.8)
-    elseif page_down_key(name) or name == "Space" or name == "space" or name == " " then self:zoomAt(nil, 1.25)
+    elseif Keys.left_key(name) then self:reattach(-1)
+    elseif Keys.right_key(name) then self:reattach(1)
+    elseif Keys.page_up_key(name) then self:zoomAt(nil, 0.8)
+    elseif Keys.page_down_key(name) or name == "Space" or name == "space" or name == " " then self:zoomAt(nil, 1.25)
     elseif name == "+" or name == "=" then self:zoomAt(nil, 1.25)
     elseif name == "-" then self:zoomAt(nil, 0.8)
     elseif tostring(name):lower() == "a" then self:addChild()
     elseif name == "Backspace" or name == "BackSpace" or name == "Del" or name == "Delete" then self:deleteSelected()
-    elseif shortcut_mod(mods) and tostring(name):lower() == "z" then self:undo()
+    elseif Keys.shortcut_mod(mods) and tostring(name):lower() == "z" then self:undo()
     elseif name == "Press" or name == "Return" or name == "Enter" or name == "KP_Enter" then
         local entry = self:selectedEntry()
         self:jumpTo(entry and entry.node.line)
@@ -1500,7 +1086,7 @@ end
 
 local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true }
 function MDEdit:init()
-    install_keyboard_aliases()
+    Keys.install_keyboard_aliases()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh }
     self.covers_fullscreen = true
@@ -1546,7 +1132,7 @@ function MDEdit:init()
     -- the newly-built editor beneath it.
     self:scheduleCaretBlink(C.EDIT.MDEDIT_CARET_RESUME_DELAY)
     self:scheduleFilePoll()
-    MinfolioPair.trace("editor-open", "path=", tostring(self.path), "lines=", #self.lines,
+    Chrome.trace("editor-open", "path=", tostring(self.path), "lines=", #self.lines,
         "remote=", self.remote and "yes" or "no")
     self:scheduleHeartbeat(10)
 end
@@ -2319,14 +1905,14 @@ function MDEdit:openTableCellEditor(hit)
         local original_on_key_press = input.onKeyPress
         function input:onKeyPress(key)
             local name = key and key.key
-            local mods = key_mods(key)
-            if name and word_key_mod(mods) and left_key(name) then
+            local mods = Keys.key_mods(key)
+            if name and Keys.word_key_mod(mods) and Keys.left_key(name) then
                 self:moveCursorToCharPos(input_prev_word_pos())
                 return true
-            elseif name and word_key_mod(mods) and right_key(name) then
+            elseif name and Keys.word_key_mod(mods) and Keys.right_key(name) then
                 self:moveCursorToCharPos(input_next_word_pos())
                 return true
-            elseif name and word_key_mod(mods)
+            elseif name and Keys.word_key_mod(mods)
                 and (name == "Backspace" or name == "BackSpace" or name == "Del" or name == "Delete") then
                 input_del_word_left()
                 return true
@@ -3106,7 +2692,7 @@ function MDEdit:reloadFromDisk(text, sig)
     self._autosave_paused_for_external = nil
     if self._autosave_pending then UIManager:unschedule(self._autosave_pending); self._autosave_pending = nil end
     self:refresh{ layout_dirty = true, full = true }
-    notify(_("Reloaded from disk"))
+    Chrome.notify(_("Reloaded from disk"))
     return true
 end
 function MDEdit:promptExternalReload(text, sig)
@@ -3127,7 +2713,7 @@ function MDEdit:checkExternalFile()
     if text == nil then
         if not self._external_missing_notified then
             self._external_missing_notified = true
-            notify(_("File is unavailable on disk"))
+            Chrome.notify(_("File is unavailable on disk"))
         end
         return
     end
@@ -3172,7 +2758,7 @@ function MDEdit:scheduleHeartbeat(delay)
         if self._closing then return end
         local now = IO.now_seconds()
         local gap = self._heartbeat_at and (now - self._heartbeat_at) or 0
-        MinfolioPair.trace("editor-heartbeat", "path=", tostring(self.path),
+        Chrome.trace("editor-heartbeat", "path=", tostring(self.path),
             "gap=", string.format("%.2f", gap), "row=", self.crow or 0,
             "vtop=", self.vtop or 0, "dirty=", self._dirty and "yes" or "no")
         self._heartbeat_at = now
@@ -3318,10 +2904,10 @@ function MDEdit:rowXAt(row, p)        -- x of absolute byte col p within a visua
 end
 function MDEdit:arrow(drow, dcol, m)  -- arrow key with optional Shift (select) / Alt-or-Command (word)
     self:flushTypeBuffer()
-    local selecting = keymod(m, "Shift")
+    local selecting = Keys.keymod(m, "Shift")
     if selecting then if not self.sel then self.sel = { row = self.crow, col = self.ccol } end
     else self.sel = nil end
-    if word_key_mod(m) and dcol ~= 0 then if dcol < 0 then self:wordLeft(selecting) else self:wordRight(selecting) end
+    if Keys.word_key_mod(m) and dcol ~= 0 then if dcol < 0 then self:wordLeft(selecting) else self:wordRight(selecting) end
     else self:moveCursor(drow, dcol, { selection = selecting }) end
 end
 function MDEdit:insertTypedText(s)
@@ -3650,20 +3236,20 @@ function MDEdit:showFindMatch(match, index, total)
     self.vtop = target_vi
     self._manual_scroll_cursor = { row = self.crow, col = self.ccol }
     self:refresh{ layout_dirty = false, selection = true }
-    notify(string.format(_("Match %d of %d"), index, total))
+    Chrome.notify(string.format(_("Match %d of %d"), index, total))
     return true
 end
 function MDEdit:findNext(query, direction)
     self:flushTypeBuffer()
     query = query or self._find_query or ""
-    if query == "" then notify(_("Enter text to find")); return false end
+    if query == "" then Chrome.notify(_("Enter text to find")); return false end
     self._find_query = query
     self._find_bar_visible = true
     local matches = self:findMatches(query)
     if #matches == 0 then
         self._find_match, self._find_match_index = nil, nil
         self:refresh{ layout_dirty = false, full = true }
-        notify(_("No matches"))
+        Chrome.notify(_("No matches"))
         return false
     end
     direction = direction or 1
@@ -3761,13 +3347,13 @@ function MDEdit:setReaderMode(enabled, target_row, target_col)
     if enabled then
         if self.keyboard then self:hideKeyboard() end
         self.caret_on = false
-        notify(_("Reader mode: tap Edit to return"))
+        Chrome.notify(_("Reader mode: tap Edit to return"))
     else
         local trow = target_row or self.top
         self.crow = math.max(1, math.min(#self.lines, trow))
         self.ccol = math.max(0, math.min(target_col or self.ccol or 0, #(self.lines[self.crow] or "")))
         self.caret_on = true
-        notify(_("Editing mode"))
+        Chrome.notify(_("Editing mode"))
     end
     -- The top bar itself changes on a mode switch (formatting tools <-> "Edit"),
     -- so force a full repaint; the partial-region paths only cover the text body
@@ -3780,8 +3366,8 @@ function MDEdit:showKeyboard()
     if self.keyboard then return end
     local VirtualKeyboard = require("ui/widget/virtualkeyboard")
     local keyboard = VirtualKeyboard:new{ inputbox = self }
-    MinfolioPair.makeKeyboardArrowFree(keyboard)
-    MinfolioPair.disableKeyboardKeyFlash(keyboard)
+    Keys.makeKeyboardArrowFree(keyboard)
+    Keys.disableKeyboardKeyFlash(keyboard)
     keyboard.modal = false
     self.keyboard = keyboard
     local editor = self
@@ -3866,7 +3452,7 @@ function MDEdit:save()
     return false
 end
 -- Handles both the app's own Rotate screen action and any generic resize;
--- rotate_screen_ccw() has already applied Screen:setRotationMode by the time
+-- Chrome.rotate_screen_ccw() has already applied Screen:setRotationMode by the time
 -- this runs, so this only needs to reflow the editor at the new dimensions.
 function MDEdit:onScreenResize()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
@@ -3885,15 +3471,15 @@ function MDEdit:onScreenResize()
     return true
 end
 function MDEdit:onResume()
-    MinfolioPair.trace("editor-resume", "path=", tostring(self.path))
+    Chrome.trace("editor-resume", "path=", tostring(self.path))
     self:checkExternalFile()
     self.caret_on = true
     self:refresh{ layout_dirty = false, full = true }
     FL.scheduleWakeSync()
-    schedule_wake_repaint()
+    Chrome.schedule_wake_repaint()
 end
 function MDEdit:onSuspend()
-    MinfolioPair.trace("editor-suspend", "path=", tostring(self.path))
+    Chrome.trace("editor-suspend", "path=", tostring(self.path))
     FL.captureBeforeSuspend()
 end
 function MDEdit:schedulePhysicalKeyboardRepaint()
@@ -3924,7 +3510,7 @@ function MDEdit:onPhysicalKeyboardConnected()
     -- The external-keyboard plugin rebuilds Device.input.event_map from scratch on
     -- attach (and re-inits input events), wiping our key aliases -- Fn/page keys,
     -- symbol keys, modifier flags. Re-apply them so e.g. Fn+Down keeps paging.
-    install_keyboard_aliases()
+    Keys.install_keyboard_aliases()
     if self.keyboard then
         self:hideKeyboard()             -- hideKeyboard already does a full repaint
     else
@@ -3953,7 +3539,7 @@ function MDEdit:saveAndOpenMarkdown()
     if open_markdown_picker then open_markdown_picker(Config.path_parent(self.path)) end
 end
 function MDEdit:onCloseWidget()
-    MinfolioPair.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
+    Chrome.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
     self._closing = true
     -- Flush before signalling the worker. The old ordering removed the shadow
     -- first, then autosave recreated it, leaving an orphaned remote session.
@@ -3996,23 +3582,23 @@ end
 function MDEdit:onKeyPress(key)
     local name = key and key.key
     if not name then return true end
-    local m = key_mods(key)
-    if shortcut_mod(m) and name:lower() == "f" then
+    local m = Keys.key_mods(key)
+    if Keys.shortcut_mod(m) and name:lower() == "f" then
         self:openFindDialog()
         return true
     end
     if self.reader_mode then
-        if left_key(name) or up_key(name) or page_up_key(name) then self:pageLeft()
-        elseif right_key(name) or down_key(name) or name == "Space" or name == "space" or name == " "
+        if Keys.left_key(name) or Keys.up_key(name) or Keys.page_up_key(name) then self:pageLeft()
+        elseif Keys.right_key(name) or Keys.down_key(name) or name == "Space" or name == "space" or name == " "
             or name == "Press" or name == "Return" or name == "Enter" or name == "KP_Enter"
-            or page_down_key(name) then self:pageRight()
+            or Keys.page_down_key(name) then self:pageRight()
         end
         return true
     end
     local lname = name:lower()
-    if shortcut_mod(m) and #name == 1 then
+    if Keys.shortcut_mod(m) and #name == 1 then
         self:flushTypeBuffer()
-        if lname == "z" then if keymod(m, "Shift") then self:redo() else self:undo() end; return true
+        if lname == "z" then if Keys.keymod(m, "Shift") then self:redo() else self:undo() end; return true
         elseif lname == "y" then self:redo(); return true
         elseif lname == "c" then self:copy(); return true
         elseif lname == "x" then self:cut(); return true
@@ -4021,33 +3607,33 @@ function MDEdit:onKeyPress(key)
     end
     if name == "Backspace" or name == "BackSpace" or name == "Del" or name == "Delete" then
         self:flushTypeBuffer()
-        if word_key_mod(m) then self:delWord() else self:delChar() end
+        if Keys.word_key_mod(m) then self:delWord() else self:delChar() end
     elseif name == "Press" or name == "Return" or name == "Enter" or name == "KP_Enter" then self:newline()
-    elseif fn_key_mod(m) and up_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageUp()
-    elseif fn_key_mod(m) and down_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageDown()
-    elseif left_key(name)  then self:arrow(0, -1, m)
-    elseif right_key(name) then self:arrow(0, 1, m)
-    elseif up_key(name)    then self:arrow(-1, 0, m)
-    elseif down_key(name)  then self:arrow(1, 0, m)
-    elseif page_up_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageUp()
-    elseif page_down_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageDown()
-    elseif name == "Space" or name == "space" or name == " " then if keymod(m, "Alt") then self:flushTypeBuffer(); self.sel = nil; self:wordRight() else self:queueTypedChar(" ") end
+    elseif Keys.fn_key_mod(m) and Keys.up_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageUp()
+    elseif Keys.fn_key_mod(m) and Keys.down_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageDown()
+    elseif Keys.left_key(name)  then self:arrow(0, -1, m)
+    elseif Keys.right_key(name) then self:arrow(0, 1, m)
+    elseif Keys.up_key(name)    then self:arrow(-1, 0, m)
+    elseif Keys.down_key(name)  then self:arrow(1, 0, m)
+    elseif Keys.page_up_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageUp()
+    elseif Keys.page_down_key(name) then self:flushTypeBuffer(); self.sel = nil; self:pageDown()
+    elseif name == "Space" or name == "space" or name == " " then if Keys.keymod(m, "Alt") then self:flushTypeBuffer(); self.sel = nil; self:wordRight() else self:queueTypedChar(" ") end
     elseif name == "ISO_Left_Tab" or name == "BackTab" then self:flushTypeBuffer(); self:indentLine(-1)
     elseif name == "Tab" then
         self:flushTypeBuffer()
-        if keymod(m, "Shift") then self:indentLine(-1)
+        if Keys.keymod(m, "Shift") then self:indentLine(-1)
         else
             local _, kind, _, task = MD.md_split_line_prefix(self.lines[self.crow])
             if kind or task then self:indentLine(1) else self:addChars("  ") end
         end
     elseif name == "Home" then self:flushTypeBuffer(); self:goToStartOfLine()
     elseif name == "End" then self:flushTypeBuffer(); self:goToEndOfLine()
-    elseif KEYPAD_CHAR[name] then self:queueTypedChar(KEYPAD_CHAR[name])
+    elseif Keys.KEYPAD_CHAR[name] then self:queueTypedChar(Keys.KEYPAD_CHAR[name])
     elseif #name == 1 then
-        if keymod(m, "Alt") then return true end
+        if Keys.keymod(m, "Alt") then return true end
         local ch = lname
-        if keymod(m, "Shift") then
-            if SHIFT_SYM[ch] then ch = SHIFT_SYM[ch] elseif ch:match("%a") then ch = ch:upper() end
+        if Keys.keymod(m, "Shift") then
+            if Keys.SHIFT_SYM[ch] then ch = Keys.SHIFT_SYM[ch] elseif ch:match("%a") then ch = ch:upper() end
         end
         self:queueTypedChar(ch)
     end
@@ -4262,11 +3848,11 @@ function MDEdit:runTopAction(name)
 end
 function MDEdit:openControls()
     if self.reader_mode then
-        show_controls({
+        Chrome.show_controls({
             { text = "Find...", callback = function() self:openFindDialog() end },
             { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
             { text = "Exit reader mode", callback = function() self:setReaderMode(false) end },
-            { text = "⟲ Rotate screen", callback = function() rotate_screen_ccw() end },
+            { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
             { text = "Save & close note", callback = function() self:saveAndClose() end },
         })
         return
@@ -4277,7 +3863,7 @@ function MDEdit:openControls()
     else
         keyboard_item = { text = "Show keyboard", callback = function() self:showKeyboard() end }
     end
-    show_controls({
+    Chrome.show_controls({
         { text = "Find...", callback = function() self:openFindDialog() end },
         { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
         { text = "Mindmap mode", callback = function() self:openMindmap() end },
@@ -4298,7 +3884,7 @@ function MDEdit:openControls()
         { text = "Paste", callback = function() self:paste() end },
         { text = "Undo",  callback = function() self:undo() end },
         { text = "Redo",  callback = function() self:redo() end },
-        { text = "⟲ Rotate screen", callback = function() rotate_screen_ccw() end },
+        { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
         { text = "Open .md file...", callback = function() self:saveAndOpenMarkdown() end },
         { text = "Save & close note", callback = function() self:saveAndClose() end },
     })
@@ -4656,8 +4242,8 @@ end
 
 -- ============================ Minfolio (native KOReader) ============================
 local function edit_note(path, remote)
-    MinfolioPair.trace("edit-request", "path=", tostring(path), "remote=", remote and "yes" or "no")
-    fl_restore_if_needed()
+    Chrome.trace("edit-request", "path=", tostring(path), "remote=", remote and "yes" or "no")
+    Frontlight.fl_restore_if_needed()
     if active_mdedit and not active_mdedit._closing then
         -- Already editing this exact file: keep the live editor (with its cursor
         -- and unsaved edits) instead of stacking a duplicate that would fight it.
@@ -4676,7 +4262,7 @@ local function edit_note(path, remote)
     end }
     active_mdedit = ed
     UIManager:show(ed, "full")   -- "full" forces a complete repaint over the menu
-    MinfolioPair.trace("editor-shown", "path=", tostring(path))
+    Chrome.trace("editor-shown", "path=", tostring(path))
     -- Closing the file browser and showing the editor each queue their own dirty
     -- updates.  Reassert the editor after that transition has drained so a
     -- browser-region update cannot win and leave a partially blank launch view.
@@ -4690,15 +4276,15 @@ end
 function MinfolioRemote.edit(descriptor_path)
     local ok, cfg = pcall(dofile, descriptor_path)
     if not ok or type(cfg) ~= "table" or type(cfg.host) ~= "string" or type(cfg.port) ~= "number" then
-        notify(_("Invalid secure desktop editing session")); return
+        Chrome.notify(_("Invalid secure desktop editing session")); return
     end
     if type(cfg.session_id) ~= "string" or not cfg.session_id:match("^[A-Za-z0-9_-]+$")
         or type(cfg.token) ~= "string" or type(cfg.cert_fingerprint) ~= "string" then
-        notify(_("Invalid secure desktop editing session")); return
+        Chrome.notify(_("Invalid secure desktop editing session")); return
     end
     lfs.mkdir(Config.STATE_DIR)
     local expected_directory = Config.MINFOLIO_REMOTE_DIR .. "/" .. cfg.session_id
-    if cfg.directory ~= expected_directory then notify(_("Invalid secure desktop editing session")); return end
+    if cfg.directory ~= expected_directory then Chrome.notify(_("Invalid secure desktop editing session")); return end
     lfs.mkdir(Config.MINFOLIO_REMOTE_DIR); lfs.mkdir(cfg.directory)
     local shadow = cfg.directory .. "/document.md"
     cfg.outbox_path = cfg.directory .. "/outbox.md"
@@ -4720,7 +4306,7 @@ end
 -- Rotates the whole device screen 90° counter-clockwise (repeat to cycle through
 -- upright / sideways / upside-down / sideways-the-other-way, same 4 modes KOReader
 -- itself uses for its own rotation).
-rotate_screen_ccw = function()
+Chrome.rotate_screen_ccw = function()
     local mode = Screen:getRotationMode()
     Screen:setRotationMode((mode - 1) % 4)
     -- Every full-screen widget we show (the file listing, the editor, any
@@ -4858,21 +4444,21 @@ local function show_new_entry_dialog(menu, dir, kind)
             { text = _("Create"), is_enter_default = true, callback = function()
                 local name = clean_entry_name(dlg:getInputText(), not is_folder)
                 UIManager:close(dlg)
-                if not name then notify(_("Invalid name")); return end
+                if not name then Chrome.notify(_("Invalid name")); return end
                 local path = Text.path_join(dir, name)
-                if lfs.attributes(path, "mode") then notify(_("Name already exists")); return end
+                if lfs.attributes(path, "mode") then Chrome.notify(_("Name already exists")); return end
                 if is_folder then
                     if ensure_dir(path) then
                         refresh_file_manager(menu, dir)
                     else
-                        notify(_("Could not create folder"))
+                        Chrome.notify(_("Could not create folder"))
                     end
                 else
                     if IO.write_file(path, "") then
                         if menu then UIManager:close(menu) end
                         edit_note(path)
                     else
-                        notify(_("Could not create note"))
+                        Chrome.notify(_("Could not create note"))
                     end
                 end
             end },
@@ -4893,14 +4479,14 @@ local function show_rename_dialog(parent_menu, dir, item)
             { text = _("Rename"), is_enter_default = true, callback = function()
                 local name = clean_entry_name(dlg:getInputText(), item.kind == "file" and Text.is_markdown_file(item.name))
                 UIManager:close(dlg)
-                if not name then notify(_("Invalid name")); return end
+                if not name then Chrome.notify(_("Invalid name")); return end
                 if name == item.name then return end
                 local dest = Text.path_join(dir, name)
-                if lfs.attributes(dest, "mode") then notify(_("Name already exists")); return end
+                if lfs.attributes(dest, "mode") then Chrome.notify(_("Name already exists")); return end
                 if os.rename(item.path, dest) then
                     refresh_file_manager(parent_menu, dir)
                 else
-                    notify(_("Could not rename"))
+                    Chrome.notify(_("Could not rename"))
                 end
             end },
         }},
@@ -4918,7 +4504,7 @@ local function confirm_delete(parent_menu, dir, item)
             if remove_tree(item.path) then
                 refresh_file_manager(parent_menu, dir)
             else
-                notify(_("Could not delete"))
+                Chrome.notify(_("Could not delete"))
             end
         end,
     })
@@ -4957,7 +4543,7 @@ local function show_item_actions(parent_menu, dir, item)
 end
 
 show_file_manager = function(start_dir)
-    fl_restore_if_needed()
+    Frontlight.fl_restore_if_needed()
     ensure_dir(Config.NOTES_DIR)
     local dir = start_dir or Config.NOTES_DIR
     if lfs.attributes(dir, "mode") ~= "directory" then dir = Config.NOTES_DIR end
@@ -4986,11 +4572,11 @@ show_file_manager = function(start_dir)
     -- of the close (X) icon. TitleBar only exposes a single right icon (the close
     -- button), so the battery is added as an extra right-aligned overlap child.
     local title_text = _("Minfolio") .. " - " .. (dir == Config.NOTES_DIR and Text.path_base(Config.NOTES_DIR) or dir)
-    local batt_info = battery_info()
+    local batt_info = Chrome.battery_info()
     -- TitleBar knows about its close icon but not the extra battery widget we
     -- overlay on the right. Reserve that whole region in its title layout so a
     -- long folder path is ellipsized before it can paint underneath the percent.
-    local battery_title_reserve = batt_info and (MinfolioBattery.indicatorWidth() + Screen:scaleBySize(44)) or 0
+    local battery_title_reserve = batt_info and (Chrome.MinfolioBattery.indicatorWidth() + Screen:scaleBySize(44)) or 0
     local title_bar = TitleBar:new{
         width = Screen:getWidth(),
         align = "center",
@@ -4999,17 +4585,17 @@ show_file_manager = function(start_dir)
         with_bottom_line = true,
         left_icon = "appbar.menu",
         left_icon_tap_callback = function()
-            show_controls({ { text = "⟲ " .. _("Rotate screen"), callback = rotate_screen_ccw } })
+            Chrome.show_controls({ { text = "⟲ " .. _("Rotate screen"), callback = Chrome.rotate_screen_ccw } })
         end,
         close_callback = function() if menu then menu:onClose() end end,
     }
-    local batt = battery_indicator(batt_info)
+    local batt = Chrome.battery_indicator(batt_info)
     local batt_cell
     if batt then
         -- Vertically centered in the title bar, then nudged up ~8px: shrinking the
         -- centering box's height by 16 raises the centered battery by half that.
         batt_cell = CenterContainer:new{
-            dimen = Geom:new{ w = MinfolioBattery.indicatorWidth(), h = math.max(1, title_bar:getHeight() - 16) }, batt }
+            dimen = Geom:new{ w = Chrome.MinfolioBattery.indicatorWidth(), h = math.max(1, title_bar:getHeight() - 16) }, batt }
         table.insert(title_bar, HorizontalGroup:new{
             align = "center", overlap_align = "right",
             batt_cell, HorizontalSpan:new{ width = Screen:scaleBySize(44) },
@@ -5071,24 +4657,24 @@ show_file_manager = function(start_dir)
         logger.info("minfolio file manager navigated:", next_dir)
     end
     if batt_cell then
-        menu._battery_key = MinfolioBattery.infoKey(batt_info)
+        menu._battery_key = Chrome.MinfolioBattery.infoKey(batt_info)
         local function schedule_battery_refresh()
             local fn
             fn = function()
                 if menu._battery_refresh_pending == fn then menu._battery_refresh_pending = nil end
                 if menu._battery_closed then return end
-                local info = battery_info()
-                local key = MinfolioBattery.infoKey(info)
+                local info = Chrome.battery_info()
+                local key = Chrome.MinfolioBattery.infoKey(info)
                 if info and key ~= menu._battery_key then
                     if batt_cell[1] and batt_cell[1].free then batt_cell[1]:free() end
-                    batt_cell[1] = battery_indicator(info)
+                    batt_cell[1] = Chrome.battery_indicator(info)
                     menu._battery_key = key
                     UIManager:setDirty(menu, "ui")
                 end
                 schedule_battery_refresh()
             end
             menu._battery_refresh_pending = fn
-            UIManager:scheduleIn(MinfolioBattery.refresh_interval, fn)
+            UIManager:scheduleIn(Chrome.MinfolioBattery.refresh_interval, fn)
         end
         local original_close = menu.onCloseWidget
         function menu:onCloseWidget()
@@ -5134,7 +4720,7 @@ end
 function Minfolio:openLaunchTarget(target)
     if not target or target == "" then return end
     logger.info("minfolio launch target =", tostring(target))
-    MinfolioPair.trace("launch-target", tostring(target))
+    Chrome.trace("launch-target", tostring(target))
     if target == "notes" or target == "open" then
         UIManager:scheduleIn(0.1, open_notes)
     elseif target:match("^edit:") then                  -- open a specific file in the editor
@@ -5152,7 +4738,7 @@ end
 function Minfolio:pollLaunchFlag()
     local target = read_launch_target(LAUNCH_FLAG)
     if target and target ~= "" then
-        MinfolioPair.trace("launch-flag-consumed", tostring(target))
+        Chrome.trace("launch-flag-consumed", tostring(target))
         os.remove(LAUNCH_FLAG)
         self:openLaunchTarget(target)
     end
@@ -5160,13 +4746,13 @@ function Minfolio:pollLaunchFlag()
 end
 
 function Minfolio:onResume()
-    MinfolioPair.trace("plugin-resume")
+    Chrome.trace("plugin-resume")
     -- Both operations wait for the screensaver/framework wake transition to settle.
     FL.scheduleWakeSync()
-    schedule_wake_repaint()
+    Chrome.schedule_wake_repaint()
 end
 function Minfolio:onSuspend()
-    MinfolioPair.trace("plugin-suspend")
+    Chrome.trace("plugin-suspend")
     FL.captureBeforeSuspend()
 end
 
@@ -5176,8 +4762,8 @@ function Minfolio:onDispatcherRegisterActions()
 end
 
 function Minfolio:init()
-    MinfolioPair.trace("plugin-init", "notes_dir=", Config.NOTES_DIR)
-    install_keyboard_aliases()
+    Chrome.trace("plugin-init", "notes_dir=", Config.NOTES_DIR)
+    Keys.install_keyboard_aliases()
     MinfolioPair.start()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)

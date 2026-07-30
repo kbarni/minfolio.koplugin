@@ -85,11 +85,18 @@ GGET_TESTS="print package"
 # list as the module that owns it is extracted, so the lint enforces its absence
 # from then on rather than permitting it. Delete the line once it is empty.
 #
-# Gone: rapidjson, MINFOLIO_REMOTE_DIR, MINFOLIO_PAIR_PATH (step 4, minfolio_config).
-# Remaining: MinfolioBattery -> minfolio_chrome (step 4);
-#            MinfolioPair -> minfolio_pair, MinfolioRemote -> minfolio_remote
+# A cautionary note on this list: while MinfolioBattery sat here, minfolio_chrome
+# took ownership of it as M.MinfolioBattery and stopped assigning the global, but
+# five call sites in main.lua still read it bare. The lint stayed green because
+# the name was allowlisted, so it masked five guaranteed nil-index errors on the
+# battery indicator. Allowlisting a name disables the only check that would have
+# caught that. Remove each name the moment its owner is extracted.
+#
+# Gone: rapidjson, MINFOLIO_REMOTE_DIR, MINFOLIO_PAIR_PATH (minfolio_config),
+#       MinfolioBattery (minfolio_chrome).
+# Remaining: MinfolioPair -> minfolio_pair, MinfolioRemote -> minfolio_remote
 #            and minfolio_app (steps 5-6).
-GGET_MINFOLIO="MinfolioPair MinfolioBattery MinfolioRemote"
+GGET_MINFOLIO="MinfolioPair MinfolioRemote"
 
 # Empty, and it should stay that way. This lint found one real bug on its
 # first run: main.lua:170-171 called notify() from a callback written before

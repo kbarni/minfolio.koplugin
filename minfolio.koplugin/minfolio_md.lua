@@ -13,7 +13,7 @@
 -- its natural home (pure line-prefix parsing), not a workaround for the forward declaration.
 --
 -- Deliberately EXCLUDES md_face/md_color (need Font/Blitbuffer -- render-facing helpers that
--- belong in a later minfolio_style module) and MD_FACES/MD_LH/MDEDIT_TABLE_PAD_X/Y (render
+-- belong in a later minfolio_style module) and MD_FACES/MDEDIT_TABLE_PAD_X/Y (render
 -- constants, same later module). Pulling those in here would silently reintroduce a KOReader
 -- dependency into what must stay a pure, off-device-testable module.
 --
