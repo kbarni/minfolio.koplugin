@@ -199,6 +199,25 @@ fi
 
 echo "Deploying via $TRANSPORT ($DESCRIPTION) ..."
 
+# Preflight: prove we can actually authenticate before starting the transfer.
+# Without this, an auth failure surfaces from inside the tar pipeline and gets
+# reported as "connection dropped or remote extraction failed", which sends you
+# looking for a network fault instead of an ssh config problem.
+#
+# The specific trap: on the LAN path the resolver supplies only an address, and
+# the script keeps "$TARGET" as the ssh destination so the host's own User and
+# IdentityFile still apply. That means $TARGET must be a real ssh_config Host.
+# kindle-utils profile names (pw5, pw2) are NOT ssh hosts, so `deploy.sh pw5`
+# resolves the address fine and then authenticates as the local user with no
+# key. Fail here, loudly, naming the cause.
+if ! ssh_k 'true' >/dev/null 2>&1; then
+    echo "deploy: cannot authenticate to '$SSH_TARGET' (resolved $DESCRIPTION)." >&2
+    echo "  '$SSH_TARGET' must be a Host in ~/.ssh/config with the right User and" >&2
+    echo "  IdentityFile. kindle-utils profile names such as pw5/pw2 are not ssh" >&2
+    echo "  hosts -- try the ssh host name instead (e.g. 'kindle')." >&2
+    exit 1
+fi
+
 # ---- 3. Transfer ------------------------------------------------------------
 # Single archive over one SSH connection, staged then swapped into place.
 #
