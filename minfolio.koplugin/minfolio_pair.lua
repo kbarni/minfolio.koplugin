@@ -67,12 +67,35 @@ function M.secret()
     return (raw:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
 end
 
+-- Returns true only when the desktop actually accepted the request.
+--
+-- This used to return true as soon as the bytes were sent, without reading the
+-- response at all. The caller treats that as "paired": it persists the secret
+-- and tells the user "Desktop paired". So a pairing the desktop *rejected* --
+-- wrong code, expired or unknown nonce, a nonce already consumed by someone
+-- else -- was reported as success, leaving the Kindle holding a secret the
+-- desktop never stored. Silent divergence: the user believes the two devices
+-- are paired and every later session fails for no visible reason.
+--
+-- Only the status line is needed, so the body is not read; `Connection: close`
+-- means closing the socket afterwards discards the rest harmlessly.
 function M.post(cfg, path, body)
     local sock = Remote.socket(cfg, 2)
     if not sock then return false end
     local raw = rapidjson.encode(body)
     local req = "POST " .. path .. " HTTP/1.1\r\nHost: " .. cfg.host .. "\r\nContent-Type: application/json\r\nContent-Length: " .. #raw .. "\r\nConnection: close\r\n\r\n" .. raw
-    Remote.sendAll(sock, req); pcall(function() sock:close() end)
+    if not Remote.sendAll(sock, req) then pcall(function() sock:close() end); return false end
+    local status = sock:receive("*l")
+    pcall(function() sock:close() end)
+    local code = type(status) == "string" and tonumber(status:match("^HTTP/%d%.%d%s+(%d%d%d)")) or nil
+    if not code then
+        logger.warn("minfolio pair: no HTTP status from desktop", tostring(status))
+        return false
+    end
+    if code < 200 or code >= 300 then
+        logger.warn("minfolio pair: desktop rejected pairing with HTTP", code)
+        return false
+    end
     return true
 end
 
