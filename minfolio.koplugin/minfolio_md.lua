@@ -127,6 +127,24 @@ function M.md_trim(s)
     return tostring(s or ""):match("^%s*(.-)%s*$") or ""
 end
 
+-- ATX heading: one to six leading '#' followed by whitespace.
+-- Returns hashes, text, prefix -- or nil when the line is not a heading.
+--
+-- Written as "#+" plus an explicit length check, NOT as "#{1,6}". Lua patterns
+-- have no {n,m} quantifier: '{' and '}' are ordinary characters, so "#{1,6}"
+-- matches the *literal* six-character text "#{1,6}" and therefore never matches
+-- a real heading. That pattern was duplicated at six call sites, so heading
+-- detection was broken everywhere at once -- the mindmap rendered every heading
+-- as a flat paragraph with its '#' markers still attached, and the editor's
+-- Outline always reported "No headings". Keeping the rule in one function is
+-- what stops the next copy of it from going wrong again.
+function M.heading(line)
+    line = tostring(line or "")
+    local hashes, text = line:match("^(#+)%s+(.-)%s*$")
+    if not hashes or #hashes > 6 then return nil end
+    return hashes, text, line:match("^(#+%s+)")
+end
+
 -- Markdown tables are permitted inside blockquotes.  Keep the prefix out of
 -- the table grammar, but retain its byte width so cell edits still replace the
 -- correct ranges in the original source line.

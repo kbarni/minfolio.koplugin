@@ -883,7 +883,8 @@ end
 
 function MindmapView:nodeText(node)
     local text = MD.md_trim(node.text)
-    text = text:gsub("^#{1,6}%s+", "")
+    local _, _, heading_prefix = MD.heading(text)
+    if heading_prefix then text = text:sub(#heading_prefix + 1) end
     if node.kind == "list" and node.task then text = (node.task:match("%[[xX]%]") and "[x] " or "[ ] ") .. text end
     if node.kind == "paragraph" then text = text:gsub("%s*\n%s*", " ") end
     local plain = {}
@@ -1038,7 +1039,8 @@ function MindmapView:nodeAt(pos)
 end
 
 function MindmapView:linePrefix(line)
-    local prefix = line:match("^(#{1,6}%s+)") or line:match("^(%s*>%s?)")
+    local _, _, heading_prefix = MD.heading(line)
+    local prefix = heading_prefix or line:match("^(%s*>%s?)")
     if prefix then return prefix end
     local indent, marker, body = line:match("^(%s*)([-*+]%s+)(.*)$")
     if not marker then indent, marker, body = line:match("^(%s*)(%d+[.)]%s+)(.*)$") end
@@ -1321,7 +1323,7 @@ function MindmapView:siblingRange(index, dir)
 end
 
 function MindmapView:lineKind(line)
-    local hashes = line:match("^(#{1,6})%s+")
+    local hashes = MD.heading(line)
     if hashes then return "heading", #hashes end
     local indent, marker = line:match("^(%s*)([-*+]%s+)")
     if not marker then indent, marker = line:match("^(%s*)(%d+[.)]%s+)") end
@@ -3751,7 +3753,7 @@ function MDEdit:outlineItems()
     self:flushTypeBuffer()
     local items = {}
     for i, line in ipairs(self.lines or {}) do
-        local hashes, text = tostring(line or ""):match("^(#{1,6})%s+(.-)%s*$")
+        local hashes, text = MD.heading(line)
         if hashes then
             local level = #hashes
             local indent = string.rep("  ", math.max(0, level - 1))

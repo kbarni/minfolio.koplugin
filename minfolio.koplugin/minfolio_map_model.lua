@@ -54,7 +54,7 @@ function M.parse_mindmap(markdown, title)
         if MD.md_trim(line) == "" then
             i = i + 1
         else
-            local hashes, htext = line:match("^(#{1,6})%s+(.*)$")
+            local hashes, htext = MD.heading(line)
             if hashes then
                 local level = #hashes
                 heading_level = level
@@ -105,7 +105,7 @@ function M.parse_mindmap(markdown, title)
                         while i <= #lines do
                             local l = lines[i] or ""
                             if MD.md_trim(l) == "" then break end
-                            if l:match("^(#{1,6})%s+") or l:match("^%s*[-*+]%s+") or l:match("^%s*%d+[.)]%s+")
+                            if MD.heading(l) or l:match("^%s*[-*+]%s+") or l:match("^%s*%d+[.)]%s+")
                                 or l:match("^%s*>") or l:match("^%s*```") or l:match("^%s*~~~") then break end
                             parts[#parts+1] = l
                             i = i + 1

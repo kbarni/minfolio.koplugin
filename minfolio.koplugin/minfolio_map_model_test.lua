@@ -38,32 +38,59 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- KNOWN PRE-EXISTING BUG, characterized (not fixed -- verbatim move, PLAN.md §2/§7.2): the
--- heading-detection pattern used at three points inside parse_mindmap (main.lua's original
--- pre-move lines 1039 and 1090, both moved into this module) is `"^(#{1,6})%s+(.*)$"` /
--- `"^(#{1,6})%s+"`. `{1,6}` is regex repetition syntax; Lua patterns have NO `{n,m}`
--- quantifier, so `{`, `1`, `,`, `6`, `}` are matched as five LITERAL characters. This pattern
--- can therefore never match a real `#`-prefixed heading line, only the literal text
--- "#{1,6} ..." -- confirmed against `git show HEAD:minfolio.koplugin/main.lua`, so this
--- predates this refactor and was not introduced by the Tier 0 move. The practical effect: NO
--- line starting with `#` is ever recognized as a heading by parse_mindmap. It falls through to
--- the paragraph branch instead, `heading_level` never advances past 0, and every non-paragraph
--- node (list/quote/code) ends up a direct child of root at depth 1, never nested under a
--- heading. This is flagged in the work-package report as a real, user-visible defect (mindmap
--- structure is flat, headings never group anything) -- out of scope to fix here per the task's
--- verbatim-move constraint. The test below documents the ACTUAL behaviour so a future fix has
--- a clear "before" baseline and this suite doesn't silently start failing when someone corrects
--- the pattern to `"^(#+)%s+(.*)$"`.
+-- Heading detection. This was a real, user-visible bug, fixed in the commit that
+-- introduced MD.heading: every site used `"^(#{1,6})%s+"`, but Lua patterns have no
+-- {n,m} quantifier -- `{`, `1`, `,`, `6`, `}` are five literal characters, so the
+-- pattern only ever matched the literal text "#{1,6} ...". No `#`-prefixed line was
+-- ever recognized as a heading, `heading_level` never advanced past 0, and the whole
+-- mindmap came out flat with '#' markers still attached to the labels.
+--
+-- These tests assert the CORRECTED behaviour: headings nest, and CommonMark's limit
+-- of six is respected. Keep them -- they are the regression fence for a bug that was
+-- duplicated at six call sites before the rule was centralised in MD.heading.
 -- ---------------------------------------------------------------------------
 
 do
     local root = MapModel.parse_mindmap("# A\n## B\n# C\n", "Doc")
-    check("KNOWN BUG: '#{1,6}' is not a valid Lua pattern quantifier, so heading lines are "
-        .. "never recognized -- three consecutive heading lines collapse into ONE paragraph "
-        .. "node (the paragraph-continuation scan doesn't break on them either, same broken "
-        .. "pattern), not three heading nodes",
-        #root.children == 1 and root.children[1].kind == "paragraph"
-        and root.children[1].text == "# A\n## B\n# C")
+    check("three heading lines produce heading nodes, not one collapsed paragraph",
+        #root.children == 2
+        and root.children[1].kind == "heading" and root.children[1].text == "A"
+        and root.children[2].kind == "heading" and root.children[2].text == "C")
+    check("a deeper heading nests under the shallower one before it",
+        #root.children[1].children == 1
+        and root.children[1].children[1].kind == "heading"
+        and root.children[1].children[1].text == "B")
+end
+
+do
+    local root = MapModel.parse_mindmap("# Top\n\n## Mid\n\n- leaf\n", "Doc")
+    check("a list item nests under the heading that precedes it",
+        #root.children == 1
+        and root.children[1].children[1].text == "Mid"
+        and root.children[1].children[1].children[1].kind == "list"
+        and root.children[1].children[1].children[1].text == "leaf")
+end
+
+do
+    -- CommonMark: seven or more '#' is not a heading. The old pattern could not
+    -- express the 1-6 bound at all; MD.heading enforces it with a length check.
+    local root = MapModel.parse_mindmap("####### Seven\n", "Doc")
+    check("seven hashes is not a heading (falls through to paragraph)",
+        #root.children == 1 and root.children[1].kind == "paragraph")
+    local six = MapModel.parse_mindmap("###### Six\n", "Doc")
+    check("six hashes IS a heading, at level 6",
+        #six.children == 1 and six.children[1].kind == "heading"
+        and six.children[1].text == "Six" and six.children[1].level == 6)
+end
+
+do
+    -- The paragraph-continuation scan used the same broken pattern, so it did not
+    -- break on a following heading either. That is what merged A/B/C into one node.
+    local root = MapModel.parse_mindmap("para text\n# Heading\n", "Doc")
+    check("a paragraph stops at a following heading rather than absorbing it",
+        #root.children == 2
+        and root.children[1].kind == "paragraph" and root.children[1].text == "para text"
+        and root.children[2].kind == "heading" and root.children[2].text == "Heading")
 end
 
 -- ---------------------------------------------------------------------------
@@ -113,15 +140,16 @@ do
 end
 
 do
-    -- Even though "# H" is never recognized as a heading, it IS still recognized as a
-    -- paragraph-break boundary against what follows: the paragraph-continuation loop breaks
-    -- when the NEXT line matches the (valid) list-marker pattern, so "# H" ends up alone as
-    -- its own single-line paragraph, and the list item that follows is a separate, sibling
-    -- top-level node -- not nested under it (since heading_level never advanced).
+    -- Previously "# H" was not recognized as a heading, so the list item that followed
+    -- became its SIBLING at top level rather than its child. With MD.heading in place
+    -- the heading is recognized, heading_level advances, and the item nests under it.
     local root = MapModel.parse_mindmap("# H\n- item one\n", "Doc")
-    check("parse_mindmap: a '#'-line followed by a list item ends up as two SIBLING nodes, not parent/child",
-        #root.children == 2 and root.children[1].kind == "paragraph" and root.children[1].text == "# H"
-        and root.children[2].kind == "list" and root.children[2].text == "item one")
+    check("a '#'-line followed by a list item nests the item under the heading",
+        #root.children == 1
+        and root.children[1].kind == "heading" and root.children[1].text == "H"
+        and #root.children[1].children == 1
+        and root.children[1].children[1].kind == "list"
+        and root.children[1].children[1].text == "item one")
 end
 
 do

@@ -348,5 +348,41 @@ do
     check("split_line_prefix: a plain line's body is the whole text", body == "plain paragraph, no marker")
 end
 
+-- ---------------------------------------------------------------------------
+-- MD.heading
+--
+-- Regression fence for a real bug: every heading site used `"^(#{1,6})%s+"`, but
+-- Lua patterns have no {n,m} quantifier, so that matched only the literal text
+-- "#{1,6} ...". Headings were never detected anywhere -- the mindmap rendered
+-- flat with '#' markers attached, and the editor's Outline always said "No
+-- headings". The 1-6 bound cannot be expressed as a Lua pattern at all, so it is
+-- a length check, and these tests pin both ends of it.
+-- ---------------------------------------------------------------------------
+
+do
+    local h, t = MD.heading("# One")
+    check("heading: one hash is level 1", h == "#" and t == "One")
+
+    h, t = MD.heading("###### Six")
+    check("heading: six hashes is level 6 (CommonMark maximum)", h == "######" and t == "Six")
+
+    check("heading: seven hashes is NOT a heading", MD.heading("####### Seven") == nil)
+    check("heading: a hash with no following space is not a heading", MD.heading("#NoSpace") == nil)
+    check("heading: ordinary prose is not a heading", MD.heading("not a heading") == nil)
+    check("heading: a literal '#{1,6}' line is not a heading either (the old pattern's only match)",
+        MD.heading("#{1,6} literal") == nil)
+
+    h, t = MD.heading("##   Padded   ")
+    check("heading: surrounding whitespace is trimmed from the text", h == "##" and t == "Padded")
+
+    h, t = MD.heading("# ")
+    check("heading: a marker with an empty title still reports its level", h == "#" and t == "")
+
+    local _, _, prefix = MD.heading("###   Spaced")
+    check("heading: the returned prefix spans the markers and all following whitespace",
+        prefix == "###   ")
+    check("heading: nil input is handled without error", MD.heading(nil) == nil)
+end
+
 print(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
