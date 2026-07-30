@@ -68,7 +68,25 @@ is doing.
 ## 2. Pairing
 
 A pairing request can reach the Kindle through **either of two independent channels**, and
-both converge on the same confirmation prompt:
+both converge on the same confirmation prompt.
+
+**Channel A does not currently work, and Channel B is the only functioning route.** The
+Kindle's own firewall drops inbound UDP: the policy is `INPUT DROP` and the only UDP
+accepted on `wlan0` is `state ESTABLISHED`, i.e. replies to conversations the Kindle
+itself opened. No rule exists for port 42771. Verified on the device rather than
+inferred: the Kindle's outbound beacons arrive at the desktop, the plugin's socket is
+bound to `0.0.0.0:42771`, the sender is on the same subnet, and the validator accepts a
+well-formed probe -- yet no `minfolio-discover` is ever answered, and a standalone
+luasocket listener on a second port run directly on the device never receives the
+datagram either. So the loss is below userspace. This is long-standing, not a
+regression: the pre-hardening module was deployed for comparison and behaves
+identically.
+
+This is why the desktop only ever delivered pair requests over SSH, and why
+`discoverKindles()` was never wired to any UI. Channel A is described below because the
+code implements it and because it becomes usable the moment an `iptables` rule accepts
+UDP on 42771 -- see `PAIRING_PLAN.md` §4.0, which treats that rule, and making it
+survive a reboot, as a prerequisite rather than a detail.
 
 **Channel A — UDP**, handled directly inside the discovery tick. The example address below
 is from RFC 5737's documentation range, deliberately: `RELEASE_CHECKLIST.md`'s pre-release

@@ -74,10 +74,39 @@ listed what SSH is for and omitted the largest item — it *is* the transport.
 | `/kindle/pair` is unauthenticated, binds `0.0.0.0`, and buffers an uncapped body | `electron/main.cjs:975-986`, `:320-325`, `:1038` |
 | `deviceId` is the hardware serial, broadcast in clear every 0.75 s | `minfolio_pair.lua:56-61,129-133` |
 | No protocol version field anywhere | `minfolio_pair.lua`, `minfolio_sync.lua:8-15`, `electron/main.cjs:1269-1277` |
+| **Inbound UDP is dropped by the Kindle's own firewall, so UDP pairing cannot work at all as designed** | `iptables -P INPUT DROP` with 7,450 packets already dropped; the only `wlan0` UDP accept is `state ESTABLISHED`. Proven end to end on the device: outbound beacons arrive on the desktop (14 in 12s), but neither a `minfolio-discover` nor a standalone luasocket listener on a second port ever receives a datagram. The pre-hardening module fails identically, so it is not a regression |
 | The sibling project already solved Kindle credential storage | `kindle-utils/kindle-mirror/remote-access/v2/kindle/kindle-relay.sh:3` keeps key and config under `/var/local` "so neither is visible through the USB userstore"; `install-kindle.sh:10-16` shows `mntroot rw` / `install -m 600` / `mntroot ro` |
 | The stale root `main.cjs` is untracked, not a committed duplicate | `git ls-files` lists only `electron/main.cjs` |
 
 ## 4. The pairing ceremony
+
+### 4.0 The prerequisite that invalidates §4 as first written
+
+The whole ceremony below assumes the Kindle can receive a UDP datagram. It cannot.
+The Kindle's firewall policy is `INPUT DROP`, and the only UDP accepted on `wlan0` is
+`state ESTABLISHED` -- replies to conversations the Kindle itself opened. There is no rule
+for port 42771, and 7,450 packets had already been dropped when this was measured.
+
+Verified on the device, not inferred: the Kindle's outbound beacons arrive fine (14 in 12
+seconds), the plugin's socket is bound (`0.0.0.0:42771`), the sender is on the same subnet,
+and the validator accepts the exact probe payload -- yet no `minfolio-discover` is ever
+answered. A standalone luasocket listener on a second port, run directly on the device,
+never receives the datagram either, which places the loss below userspace. The
+pre-hardening module was deployed and tested for comparison and behaves identically, so
+this is long-standing, not a regression.
+
+This also explains two things that had looked like oversights: the desktop only ever
+delivered pair requests over SSH, and `discoverKindles()` was never wired to any UI.
+The SSH file drop was not an unfinished shortcut, it is the only channel that functions.
+
+**Consequence.** Every UDP-based step in this plan -- the offer broadcast in §4, the
+session-available nudge in §5.2, and the unpair datagram in §5.7 -- needs an `iptables`
+rule accepting UDP on 42771 on `wlan0`, installed at pairing time and made persistent
+across reboots, since Kindle firewall rules do not survive one. That is a firewall
+modification on the user's device and a real change to what "no configuration required"
+means. It must be decided before any of §4 is implemented, and it belongs in the
+onboarding story of §1 rather than being discovered by a user whose pairing silently
+never arrives.
 
 v1 proposed broadcasting the nonce and code and having the user compare the code.
 Both reviewers destroyed it, correctly: that puts the shared secret on the wire, so
@@ -304,6 +333,7 @@ Ordering per the reviews, which found v1's graph wrong in three places.
 
 | Risk | Mitigation |
 |---|---|
+| **Inbound UDP dropped by the Kindle firewall** | §4.0. Requires a persistent iptables rule; until then no UDP step in this plan can work |
 | Broadcast blocked | manual address entry, plus SSH as an explicit user action (§4) |
 | Blind-accept of a mismatched prompt | arming plus the fingerprint prefix on both screens; irreducible beyond that |
 | `/var/local` does not survive a firmware update | test before committing; fall back to `/mnt/us` with the exclusion documented |
@@ -317,6 +347,7 @@ Ordering per the reviews, which found v1's graph wrong in three places.
 1. A desktop with no SSH access, no key, and no config file can pair with a Kindle:
    the user arms pairing on the Kindle, both screens show the same fingerprint
    prefix, the user types the Kindle's code into the desktop, and pairing completes.
+2. The Kindle accepts inbound UDP on 42771, and the rule survives a reboot.
 2. Outside the armed window, a `minfolio-pair-offer` produces no prompt at all.
 3. A spoofed offer carrying an attacker's host, port and fingerprint cannot cause the
    Kindle to send its secret anywhere, because the Kindle connects only to a stored
