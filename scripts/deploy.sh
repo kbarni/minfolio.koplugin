@@ -80,12 +80,16 @@ GGET_STDLIB="_G arg assert debug dofile io ipairs math os pairs pcall require se
 # Without these the first test file added would fail the lint, not the tests.
 GGET_TESTS="print package"
 
-# The six deliberate Minfolio globals (PLAN.md section 6.4), forced into
-# existence only by the 200-local ceiling this whole refactor exists to
-# remove (main.lua:71-75 explains why, in its own comment). Migration step 2
-# converts each to a module return. DELETE THIS LINE the moment that lands,
-# so the lint starts enforcing their absence instead of permitting it.
-GGET_MINFOLIO="rapidjson MINFOLIO_REMOTE_DIR MINFOLIO_PAIR_PATH MinfolioPair MinfolioBattery MinfolioRemote"
+# The deliberate Minfolio globals (PLAN.md section 6.4), forced into existence
+# only by the 200-local ceiling this refactor exists to remove. Each leaves this
+# list as the module that owns it is extracted, so the lint enforces its absence
+# from then on rather than permitting it. Delete the line once it is empty.
+#
+# Gone: rapidjson, MINFOLIO_REMOTE_DIR, MINFOLIO_PAIR_PATH (step 4, minfolio_config).
+# Remaining: MinfolioBattery -> minfolio_chrome (step 4);
+#            MinfolioPair -> minfolio_pair, MinfolioRemote -> minfolio_remote
+#            and minfolio_app (steps 5-6).
+GGET_MINFOLIO="MinfolioPair MinfolioBattery MinfolioRemote"
 
 # Empty, and it should stay that way. This lint found one real bug on its
 # first run: main.lua:170-171 called notify() from a callback written before

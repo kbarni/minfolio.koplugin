@@ -32,45 +32,19 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local Notification = require("ui/widget/notification")
 local lfs = require("libs/libkoreader-lfs")
 local socket = require("socket")
-rapidjson = require("rapidjson")
+local rapidjson = require("rapidjson")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = Device.screen
 local MD = require("minfolio_md")
 local Text = require("minfolio_text")
 local MapModel = require("minfolio_map_model")
+local Config = require("minfolio_config")
+local IO = require("minfolio_io")
+local State = require("minfolio_state")
+local Style = require("minfolio_style")
+local C = require("minfolio_const")
 
-local function now_seconds()
-    return (socket and socket.gettime and socket.gettime()) or os.time()
-end
-
-local function plugin_dir()
-    local src = debug.getinfo(1, "S").source or ""
-    src = src:gsub("^@", "")
-    return src:match("^(.*)/[^/]*$") or "."
-end
-
-local function load_local_config()
-    local ok, cfg = pcall(dofile, plugin_dir() .. "/config.lua")
-    if ok and type(cfg) == "table" then
-        return cfg
-    end
-    return {}
-end
-
-local CONFIG = load_local_config()
-local NOTES_DIR = CONFIG.notes_dir or "/mnt/us/notes"
-local STATE_DIR = CONFIG.state_dir or "/mnt/us/.minfolio"
-MINFOLIO_REMOTE_DIR = "/mnt/us/.minfolio-remote"
-local FL_STATE_PATH = STATE_DIR .. "/frontlight.lua"
-local MINFOLIO_STATE_PATH = STATE_DIR .. "/state.lua"
-MINFOLIO_PAIR_PATH = STATE_DIR .. "/pairing.lua"
--- Migrate only the old persistent settings; remote session caches are disposable.
-if not CONFIG.state_dir and lfs.attributes("/mnt/us/minfolio", "mode") == "directory" and lfs.attributes(STATE_DIR, "mode") ~= "directory" then
-    lfs.mkdir(STATE_DIR)
-    os.rename("/mnt/us/minfolio/state.lua", MINFOLIO_STATE_PATH)
-    os.rename("/mnt/us/minfolio/frontlight.lua", FL_STATE_PATH)
-end
 MinfolioPair = { port = 42771 }
 -- Keep lifecycle evidence in KOReader's crash log without making the normal
 -- editor path noisy.  These markers make a silent UI-loop stall distinguishable
@@ -167,8 +141,8 @@ function MinfolioPair.showPrompt(msg)
         local cfg = { host = msg.host, port = tonumber(msg.port), cert_fingerprint = msg.fingerprint }
         local secret = MinfolioPair.secret()
         if MinfolioPair.post(cfg, "/kindle/pair", { nonce = msg.nonce, code = msg.code, deviceId = MinfolioPair.deviceId(), secret = secret }) then
-            lfs.mkdir(STATE_DIR)
-            local state = io.open(MINFOLIO_PAIR_PATH, "w")
+            lfs.mkdir(Config.STATE_DIR)
+            local state = io.open(Config.MINFOLIO_PAIR_PATH, "w")
             if state then state:write(string.format("return { secret = %q }\n", secret)); state:close() end
             UIManager:show(Notification:new{ text = _("Desktop paired"), timeout = 3 })
         else UIManager:show(Notification:new{ text = _("Could not complete secure pairing"), timeout = 3 }) end
@@ -180,7 +154,7 @@ function MinfolioPair.pollRequest()
     if not fp then return end
     fp:close()
     os.remove(flag)
-    local ok, msg = pcall(dofile, MINFOLIO_REMOTE_DIR .. "/pair-request.lua")
+    local ok, msg = pcall(dofile, Config.MINFOLIO_REMOTE_DIR .. "/pair-request.lua")
     if ok then MinfolioPair.showPrompt(msg) end
 end
 function MinfolioPair.poll()
@@ -201,7 +175,7 @@ function MinfolioPair.poll()
         end
     end
     if processed == max_per_tick then
-        local now = now_seconds()
+        local now = IO.now_seconds()
         if not MinfolioPair._last_backpressure_log or now - MinfolioPair._last_backpressure_log >= 30 then
             MinfolioPair._last_backpressure_log = now
             logger.warn("minfolio discovery queue capped; deferring remaining UDP datagrams")
@@ -284,57 +258,14 @@ local function battery_indicator(info)
         face = Font:getFace("cfont", 17), fgcolor = Blitbuffer.COLOR_BLACK }
     return HorizontalGroup:new{ align = "center", body, nub, HorizontalSpan:new{ width = bs(5) }, pct }
 end
-local function write_file(path, data)
-    local f = io.open(path, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
-    return true
-end
-local function read_file(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local data = f:read("*a")
-    f:close()
-    return data
-end
 local function read_frontlight_state()
-    local ok, state = pcall(dofile, FL_STATE_PATH)
+    local ok, state = pcall(dofile, Config.FL_STATE_PATH)
     return (ok and type(state) == "table") and state or {}
-end
-local function clamp_minfolio_scale(scale)
-    return math.max(0.6, math.min(1.8, tonumber(scale) or 1.0))
-end
-local function read_minfolio_state()
-    local ok, state = pcall(dofile, MINFOLIO_STATE_PATH)
-    return (ok and type(state) == "table") and state or {}
-end
-local MINFOLIO_STATE = read_minfolio_state()
-MINFOLIO_STATE.scale = clamp_minfolio_scale(MINFOLIO_STATE.scale or CONFIG.minfolio_scale)
-MINFOLIO_STATE.positions = type(MINFOLIO_STATE.positions) == "table" and MINFOLIO_STATE.positions or {}
-local function save_minfolio_state()
-    lfs.mkdir(STATE_DIR)
-    local positions = {}
-    for path, position in pairs(MINFOLIO_STATE.positions) do
-        if type(path) == "string" and type(position) == "table" then
-            local line = math.max(1, math.floor(tonumber(position.line) or 1))
-            local ri = math.max(1, math.floor(tonumber(position.ri) or 1))
-            local crow = math.max(1, math.floor(tonumber(position.crow) or 1))
-            local ccol = math.max(0, math.floor(tonumber(position.ccol) or 0))
-            positions[#positions + 1] = string.format(
-                "[%q] = { line = %d, ri = %d, kind = %q, crow = %d, ccol = %d, reader_mode = %s },",
-                path, line, ri, tostring(position.kind or "row"), crow, ccol,
-                position.reader_mode and "true" or "false")
-        end
-    end
-    write_file(MINFOLIO_STATE_PATH, string.format(
-        "return { scale = %.3f, positions = { %s } }\n",
-        clamp_minfolio_scale(MINFOLIO_STATE.scale), table.concat(positions, " ")))
 end
 local FL
 local function save_frontlight_state()
-    lfs.mkdir(STATE_DIR)
-    write_file(FL_STATE_PATH, string.format(
+    lfs.mkdir(Config.STATE_DIR)
+    IO.write_file(Config.FL_STATE_PATH, string.format(
         "return { on = %s, bright = %d, last = %d, amber = %d }\n",
         FL.on and "true" or "false",
         math.floor(FL.bright or 0),
@@ -486,27 +417,6 @@ local function show_controls(extra, on_close)
     return menu
 end
 
--- ============================ Markdown styled renderer (Phase 0) ============================
--- tokenize text -> array of lines, each {block=<style>, spans={{text,style},...}}
-local MD_FACES = {
-    normal = {"cfont", 22}, h1 = {"tfont", 34}, h2 = {"tfont", 29}, h3 = {"tfont", 25},
-    bullet = {"cfont", 22}, task = {"cfont", 22}, quote = {"cfont", 22}, bold = {"tfont", 22}, italic = {"ifont", 22},
-    code = {"infont", 20}, syntax = {"cfont", 22},
-}
-local MD_LH = { normal = 25, h1 = 39, h2 = 33, h3 = 29, bullet = 25, quote = 25 }  -- ~1.15 line-height
-local MDEDIT_TABLE_PAD_X = 8
-local MDEDIT_TABLE_PAD_Y = 5
-local function md_face(style, scale)
-    local f = MD_FACES[style] or MD_FACES.normal
-    return Font:getFace(f[1], math.floor(f[2] * (scale or 1)))
-end
-local function md_color(style)
-    if style == "syntax" then return Blitbuffer.COLOR_WHITE end
-    if style == "code" then return Blitbuffer.Color8(55) end
-    if style == "quote" then return Blitbuffer.Color8(95) end
-    return Blitbuffer.COLOR_BLACK
-end
-
 -- ============================ Live styled markdown editor (Phase 1) ============================
 -- Shift map for BT-keyboard symbol keys (used by MDEdit:onKeyPress).
 local SHIFT_SYM = {
@@ -628,27 +538,6 @@ local function down_key(name)
     return name == "Down" or name == "ArrowDown" or name == "KEY_DOWN" or name == "CursorDown"
 end
 local md_clipboard = ""               -- shared across notes
-local function path_parent(path)
-    path = tostring(path or NOTES_DIR):gsub("/+$", "")
-    if path == "" or path == "/" then return "/" end
-    local p = path:match("^(.*)/[^/]+$")
-    if not p or p == "" then return "/" end
-    return p
-end
-local function file_signature(path)
-    local ok, attr = pcall(lfs.attributes, path)
-    if not ok or type(attr) ~= "table" then return nil end
-    return {
-        mode = attr.mode or "",
-        size = tonumber(attr.size) or 0,
-        modification = tonumber(attr.modification) or 0,
-    }
-end
-local function same_file_signature(a, b)
-    if a == b then return true end
-    if not a or not b then return false end
-    return a.mode == b.mode and a.size == b.size and a.modification == b.modification
-end
 local open_markdown_picker, rotate_screen_ccw, show_file_manager   -- fwd decls
 -- Only ever one editor at a time. Opening a note while another editor is live
 -- (e.g. a re-send via kindle-send, or a duplicate launch-flag write) must not
@@ -669,70 +558,6 @@ local function schedule_wake_repaint()
         UIManager:setDirty("all", "full")
     end)
 end
-local MDEDIT_PAD = 24
-local MDEDIT_TOPBAR_H = 56
-local MDEDIT_TOPBAR_GAP = 14
-local MDEDIT_TOOL_MIN_CELL = 72
-local MDEDIT_TOOL_DIVIDER = 1
-local MDEDIT_TITLE_ACTION_GAP = 18
-local MDEDIT_MENU_W = 52
-local MDEDIT_TITLE_W = 360
-local MDEDIT_PROGRESS_H = 2
-local MDEDIT_PROGRESS_GAP = 10
-local MDEDIT_LINE_HEIGHT = 0.80
-local MDEDIT_LINE_GAP = 0
-local MDEDIT_PARA_GAP = 12
-local MDEDIT_CARET_BLINK = 0.55
-local MDEDIT_CARET_RESUME_DELAY = 0.70
-local MDEDIT_SELECT_PAN_MIN = 18
-local MDEDIT_EDIT_SCROLL_PAN_MIN = 42
-local MDEDIT_PAGE_PAN_MIN = 24   -- min vertical drag (px) that triggers a page turn
-local MDEDIT_EDIT_DTAP = 0.22    -- edit-mode double-tap must be deliberate; same cursor cell prevents reposition taps selecting
-local MDEDIT_EDIT_DTAP_MOVE = 18
-local MDEDIT_READER_DTAP = 0.25  -- reader double-tap must land within this fast window (also the single-tap page delay)
-local MDEDIT_READER_EDGE = 130   -- reader taps within this many px of the L/R/bottom edge are page-turns, never an exit
-local MDEDIT_AUTOSAVE_DELAY = 1.0
-local MDEDIT_TYPE_FIRST_FLUSH_DELAY = 0.02
-local MDEDIT_TYPE_FLUSH_DELAY = 0.045
-local MDEDIT_TYPE_BURST_IDLE = 0.30
-local MDEDIT_FILE_RELOAD_INTERVAL = 2.0
-local MDEDIT_KEYBOARD_SWIPE_EDGE = 90
-local MDEDIT_KEYBOARD_SWIPE_DY = 35
--- Hairline gap kept between the last text row and the keyboard's top edge, so the
--- text can run down into the strip that catches the swipe-to-hide gesture without
--- sitting flush against the keys.
-local MDEDIT_KBD_TEXT_GAP = 8
--- Light-gray fill drawn behind ==highlighted== text (distinct from the darker
--- selection gray, and light enough to keep black text legible on e-ink).
-local MDEDIT_HIGHLIGHT_GRAY = Blitbuffer.Color8(190)
-local MINDMAP_PAD = 34
-local MINDMAP_TOPBAR_H = 56
-local MINDMAP_TOPBAR_GAP = 16
-local MINDMAP_TOPBAR_PAD_X = Size.padding.large
-local MINDMAP_TOPBAR_PAD_RIGHT = Size.padding.small
--- Match the editor's top framing so mode switches do not shift the chrome.
-local MINDMAP_TOPBAR_TOP_PAD = MDEDIT_PAD
-local MINDMAP_CLOSE_W = Screen:scaleBySize(50)
-local MINDMAP_ACTION_DIVIDER = 1
-local MINDMAP_MENU_TITLE_GAP = Screen:scaleBySize(18)
-local MINDMAP_ACTION_MIN_W = Screen:scaleBySize(64)
-local MINDMAP_EDIT_DTAP = 0.30
-local MINDMAP_EDIT_DTAP_MOVE = 28
-local MINDMAP_WORLD_TOP = 80
-local MINDMAP_WORLD_ROW = 54
-local MINDMAP_LABEL_GAP = 8
-local MINDMAP_NODE_MIN_W = 200
-local MINDMAP_NODE_MAX_W = 560
-local MINDMAP_NODE_TAIL = 110
-local MINDMAP_COLUMN_GAP = 90
-local MINDMAP_NODE_H = 30
-local MINDMAP_TEXT_BOTTOM_PAD = Screen:scaleBySize(5)
-local MINDMAP_TEXT_LINE_TIGHTEN = Screen:scaleBySize(7)
-local MINDMAP_MIN_ZOOM = 0.38
-local MINDMAP_MAX_ZOOM = 2.2
-local MINDMAP_PAN_GESTURE = 70
-local MINDMAP_PAN_STEP = Screen:scaleBySize(100)
-local MINDMAP_PAN_MIN_VISIBLE = Screen:scaleBySize(80)
 
 -- ============================ Native Markdown mindmap ============================
 -- Tree parsing/model moved to minfolio_map_model.lua (PLAN.md §5 Tier 0); this file now only
@@ -774,12 +599,12 @@ function MindmapCanvas:paintTo(bb, x, y)
         local selected = entry.index == map.selected
         local style = n.kind == "root" and "h1" or map:nodeStyle(n)
         if nx + nw >= x and nx <= x + w and ny + nh >= y and ny <= y + h and nw > 22 and nh > 12 then
-            local face = md_face(style, math.max(0.45, map.scale * map.zoom))
+            local face = Style.md_face(style, math.max(0.45, map.scale * map.zoom))
             local lines = (selected and map.editing_index == entry.index and map.edit_lines) or n.mlines or { map:nodeText(n) }
             local ty = ny + 1
             local edit_cursor, chars_before, cursor_drawn = selected and map.editing_index == entry.index and map.edit_col, 0, false
             for line_i, text in ipairs(lines) do
-                local tw = TextWidget:new{ text = text, face = face, fgcolor = md_color(style) }
+                local tw = TextWidget:new{ text = text, face = face, fgcolor = Style.md_color(style) }
                 local ts = tw:getSize()
                 -- TextWidget paints directly into the BlitBuffer and does not
                 -- safely clip negative/off-edge coordinates. Nodes can straddle
@@ -796,7 +621,7 @@ function MindmapCanvas:paintTo(bb, x, y)
                 end
                 chars_before = chars_before + #text + 1
                 if line_i < #lines then
-                    ty = ty + math.max(1, ts.h - MINDMAP_TEXT_LINE_TIGHTEN)
+                    ty = ty + math.max(1, ts.h - C.MAP.MINDMAP_TEXT_LINE_TIGHTEN)
                 end
                 tw:free()
             end
@@ -811,14 +636,14 @@ local MindmapView = InputContainer:extend{ editor = nil, is_always_active = true
 function MindmapView:init()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh }
-    self.scale = self.editor and self.editor.scale or clamp_minfolio_scale(MINFOLIO_STATE.scale)
+    self.scale = self.editor and self.editor.scale or State.clamp_minfolio_scale(State.MINFOLIO_STATE.scale)
     self.parent = self
     self.path = self.editor and self.editor.path or ""
     self.root = MapModel.parse_mindmap(self.editor and self.editor:currentText() or "", Text.path_base(self.path))
     self.rows, self.selected, self._undo, self.top_zones = {}, 1, {}, {}
     self.zoom, self.pan_x, self.pan_y = 1, 0, 0
     self.caret_on, self._map_caret_blinking = true, true
-    self.canvas_y = MINDMAP_TOPBAR_H + MINDMAP_TOPBAR_TOP_PAD + MINDMAP_TOPBAR_GAP
+    self.canvas_y = C.MAP.MINDMAP_TOPBAR_H + C.MAP.MINDMAP_TOPBAR_TOP_PAD + C.MAP.MINDMAP_TOPBAR_GAP
     if Device:isTouchDevice() then
         self.ges_events = {
             Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
@@ -907,7 +732,7 @@ function MindmapView:mapDirtyTarget()
 end
 
 function MindmapView:scheduleMapCaretBlink()
-    UIManager:scheduleIn(MDEDIT_CARET_BLINK, function()
+    UIManager:scheduleIn(C.EDIT.MDEDIT_CARET_BLINK, function()
         if not self._map_caret_blinking then return end
         if self.editing_index then
             self.caret_on = not self.caret_on
@@ -924,20 +749,20 @@ function MindmapView:layoutMap()
     local function measure(node)
         local style = node.kind == "root" and "h1" or self:nodeStyle(node)
         local text = node.kind == "root" and node.text or (node._edit_text or self:nodeText(node))
-        local face = md_face(style, self.scale)
-        local text_limit = MINDMAP_NODE_MAX_W - MINDMAP_NODE_TAIL
-        node.mw = math.max(MINDMAP_NODE_MIN_W, math.min(MINDMAP_NODE_MAX_W, self:textw(text, face) + MINDMAP_NODE_TAIL))
-        node.mlines = self:wrapNodeText(text, math.min(text_limit, node.mw - MINDMAP_NODE_TAIL), face)
+        local face = Style.md_face(style, self.scale)
+        local text_limit = C.MAP.MINDMAP_NODE_MAX_W - C.MAP.MINDMAP_NODE_TAIL
+        node.mw = math.max(C.MAP.MINDMAP_NODE_MIN_W, math.min(C.MAP.MINDMAP_NODE_MAX_W, self:textw(text, face) + C.MAP.MINDMAP_NODE_TAIL))
+        node.mlines = self:wrapNodeText(text, math.min(text_limit, node.mw - C.MAP.MINDMAP_NODE_TAIL), face)
         -- The canvas keeps type readable at low zoom (rather than scaling it
         -- below 0.45). Measure that exact rendered face here, then convert its
         -- screen height back to map coordinates. This keeps wrapped labels above
         -- their fixed terminator line instead of letting text paint through it.
         local render_scale = math.max(0.45, self.scale * self.zoom)
-        local probe = TextWidget:new{ text = "Hg", face = md_face(style, render_scale) }
+        local probe = TextWidget:new{ text = "Hg", face = Style.md_face(style, render_scale) }
         local line_h = probe:getSize().h; probe:free()
-        local line_step = math.max(1, line_h - MINDMAP_TEXT_LINE_TIGHTEN)
+        local line_step = math.max(1, line_h - C.MAP.MINDMAP_TEXT_LINE_TIGHTEN)
         local text_h = line_h + math.max(0, #node.mlines - 1) * line_step
-        node.mh = math.max(MINDMAP_NODE_H, math.ceil((text_h + MINDMAP_TEXT_BOTTOM_PAD) / self.zoom))
+        node.mh = math.max(C.MAP.MINDMAP_NODE_H, math.ceil((text_h + C.MAP.MINDMAP_TEXT_BOTTOM_PAD) / self.zoom))
         node._map_depth = node._map_depth or 0
         max_depth = math.max(max_depth, node._map_depth)
         max_width_by_depth[node._map_depth] = math.max(max_width_by_depth[node._map_depth] or 0, node.mw)
@@ -948,17 +773,17 @@ function MindmapView:layoutMap()
     local column_x, x = {}, 0
     for depth = 0, max_depth do
         column_x[depth] = x
-        x = x + (max_width_by_depth[depth] or MINDMAP_NODE_MIN_W) + MINDMAP_COLUMN_GAP
+        x = x + (max_width_by_depth[depth] or C.MAP.MINDMAP_NODE_MIN_W) + C.MAP.MINDMAP_COLUMN_GAP
     end
     local leaf_count, last_leaf_baseline = 0, nil
     local function place(node, depth)
         node.mx = column_x[depth] or 0
         if #node.children == 0 then
-            local nominal = MINDMAP_WORLD_TOP + leaf_count * MINDMAP_WORLD_ROW
+            local nominal = C.MAP.MINDMAP_WORLD_TOP + leaf_count * C.MAP.MINDMAP_WORLD_ROW
             -- Labels are bottom-aligned to their terminator line. Expand only
             -- the following branch's gap when its upward-growing label needs it.
             node.baseline = last_leaf_baseline and math.max(
-                nominal, last_leaf_baseline + node.mh + MINDMAP_LABEL_GAP
+                nominal, last_leaf_baseline + node.mh + C.MAP.MINDMAP_LABEL_GAP
             ) or nominal
             node.my = node.baseline - node.mh
             last_leaf_baseline = node.baseline
@@ -997,7 +822,7 @@ function MindmapView:layoutMap()
         local previous
         for _, node in ipairs(by_depth[depth] or {}) do
             if previous then
-                local delta = previous.baseline + MINDMAP_LABEL_GAP - node.my
+                local delta = previous.baseline + C.MAP.MINDMAP_LABEL_GAP - node.my
                 if delta > 0 then shift_branch(node, delta) end
             end
             previous = node
@@ -1006,10 +831,10 @@ function MindmapView:layoutMap()
     end
     self.visual_nodes = { { index = 0, node = self.root } }
     for i, entry in ipairs(self.rows) do self.visual_nodes[#self.visual_nodes+1] = { index = i, node = entry.node } end
-    self.world_w = math.max(MINDMAP_NODE_MIN_W, x - MINDMAP_COLUMN_GAP)
-    local bottom = MINDMAP_WORLD_TOP
+    self.world_w = math.max(C.MAP.MINDMAP_NODE_MIN_W, x - C.MAP.MINDMAP_COLUMN_GAP)
+    local bottom = C.MAP.MINDMAP_WORLD_TOP
     for _, entry in ipairs(self.visual_nodes) do bottom = math.max(bottom, entry.node.baseline) end
-    self.world_h = math.max(MINDMAP_NODE_H, bottom + MINDMAP_WORLD_ROW)
+    self.world_h = math.max(C.MAP.MINDMAP_NODE_H, bottom + C.MAP.MINDMAP_WORLD_ROW)
 end
 
 function MindmapView:wrapNodeText(text, maxw, face)
@@ -1028,7 +853,7 @@ end
 
 function MindmapView:nodeAt(pos)
     if not pos then return nil end
-    local wx = (pos.x - MINDMAP_PAD - self.pan_x) / self.zoom
+    local wx = (pos.x - C.MAP.MINDMAP_PAD - self.pan_x) / self.zoom
     local wy = (pos.y - self.canvas_y - self.pan_y) / self.zoom
     local root = self.root
     if root and wx >= root.mx and wx <= root.mx + root.mw and wy >= root.my and wy <= root.my + root.mh then return 0 end
@@ -1081,7 +906,7 @@ function MindmapView:beginNodeEdit(index)
     self.edit_prefix = self:linePrefix(line)
     self.edit_text, self.edit_col = line:sub(#self.edit_prefix + 1), #line - #self.edit_prefix
     entry.node._edit_text = self.edit_text
-    self.edit_lines = self:wrapNodeText(self.edit_text, MINDMAP_NODE_MAX_W - MINDMAP_NODE_TAIL, md_face(self:nodeStyle(entry.node), self.scale))
+    self.edit_lines = self:wrapNodeText(self.edit_text, C.MAP.MINDMAP_NODE_MAX_W - C.MAP.MINDMAP_NODE_TAIL, Style.md_face(self:nodeStyle(entry.node), self.scale))
     self:layoutMap()
     self:showMapKeyboard()
     self:refresh()
@@ -1091,7 +916,7 @@ function MindmapView:updateEditLayout()
     local entry = self:selectedEntry()
     if entry then
         entry.node._edit_text = self.edit_text
-        self.edit_lines = self:wrapNodeText(self.edit_text, MINDMAP_NODE_MAX_W - MINDMAP_NODE_TAIL, md_face(self:nodeStyle(entry.node), self.scale))
+        self.edit_lines = self:wrapNodeText(self.edit_text, C.MAP.MINDMAP_NODE_MAX_W - C.MAP.MINDMAP_NODE_TAIL, Style.md_face(self:nodeStyle(entry.node), self.scale))
         self:layoutMap()
     end
     self:refresh()
@@ -1162,19 +987,19 @@ function MindmapView:scrollDown() end
 function MindmapView:onSwitchingKeyboardLayout() end
 
 function MindmapView:fitMap()
-    local vw, vh = self.fw - (MINDMAP_PAD * 2), self.fh - self.canvas_y - MINDMAP_PAD
-    self.zoom = math.max(MINDMAP_MIN_ZOOM, math.min(1.0, vw / (self.world_w + 40), vh / (self.world_h + 40)))
+    local vw, vh = self.fw - (C.MAP.MINDMAP_PAD * 2), self.fh - self.canvas_y - C.MAP.MINDMAP_PAD
+    self.zoom = math.max(C.MAP.MINDMAP_MIN_ZOOM, math.min(1.0, vw / (self.world_w + 40), vh / (self.world_h + 40)))
     self.pan_x = math.floor((vw - self.world_w * self.zoom) / 2)
     self.pan_y = math.floor((vh - self.world_h * self.zoom) / 2)
 end
 
 function MindmapView:clampPan()
-    local vw, vh = self.fw - (MINDMAP_PAD * 2), self.fh - self.canvas_y - MINDMAP_PAD
+    local vw, vh = self.fw - (C.MAP.MINDMAP_PAD * 2), self.fh - self.canvas_y - C.MAP.MINDMAP_PAD
     local map_w, map_h = self.world_w * self.zoom, self.world_h * self.zoom
     -- Fitted maps must still be movable. The bounds retain a small visible
     -- slice of content instead of re-centering a map merely because it fits.
-    local visible_w = math.min(MINDMAP_PAN_MIN_VISIBLE, map_w)
-    local visible_h = math.min(MINDMAP_PAN_MIN_VISIBLE, map_h)
+    local visible_w = math.min(C.MAP.MINDMAP_PAN_MIN_VISIBLE, map_w)
+    local visible_h = math.min(C.MAP.MINDMAP_PAN_MIN_VISIBLE, map_h)
     self.pan_x = math.max(visible_w - map_w, math.min(vw - visible_w, self.pan_x))
     self.pan_y = math.max(visible_h - map_h, math.min(vh - visible_h, self.pan_y))
 end
@@ -1192,52 +1017,52 @@ function MindmapView:topBar(cw)
     }
     local action_total = 0
     for _, item in ipairs(labels) do
-        item.w = item.icon and MINDMAP_CLOSE_W or math.max(MINDMAP_ACTION_MIN_W, self:textw(item.text, action_face) + 28)
+        item.w = item.icon and C.MAP.MINDMAP_CLOSE_W or math.max(C.MAP.MINDMAP_ACTION_MIN_W, self:textw(item.text, action_face) + 28)
         action_total = action_total + item.w
     end
-    action_total = action_total + ((#labels - 1) * MINDMAP_ACTION_DIVIDER)
-    local max_title_w = math.max(60, cw - MDEDIT_MENU_W - MINDMAP_MENU_TITLE_GAP - action_total - MDEDIT_TITLE_ACTION_GAP)
+    action_total = action_total + ((#labels - 1) * C.MAP.MINDMAP_ACTION_DIVIDER)
+    local max_title_w = math.max(60, cw - C.EDIT.MDEDIT_MENU_W - C.MAP.MINDMAP_MENU_TITLE_GAP - action_total - C.EDIT.MDEDIT_TITLE_ACTION_GAP)
     local title = self:trimToWidth(raw_title, max_title_w, title_face)
     local title_w = self:textw(title, title_face)
-    local gap_w = math.max(MDEDIT_TITLE_ACTION_GAP, cw - MDEDIT_MENU_W - MINDMAP_MENU_TITLE_GAP - title_w - action_total)
-    local x = MDEDIT_MENU_W + MINDMAP_MENU_TITLE_GAP
-    self.top_zones.menu = { x0 = 0, x1 = MDEDIT_MENU_W }
+    local gap_w = math.max(C.EDIT.MDEDIT_TITLE_ACTION_GAP, cw - C.EDIT.MDEDIT_MENU_W - C.MAP.MINDMAP_MENU_TITLE_GAP - title_w - action_total)
+    local x = C.EDIT.MDEDIT_MENU_W + C.MAP.MINDMAP_MENU_TITLE_GAP
+    self.top_zones.menu = { x0 = 0, x1 = C.EDIT.MDEDIT_MENU_W }
     x = x + title_w + gap_w
     local actions = {}
     for i, item in ipairs(labels) do
         if i > 1 then
-            actions[#actions+1] = CenterContainer:new{ dimen = Geom:new{ w = MINDMAP_ACTION_DIVIDER, h = MINDMAP_TOPBAR_H },
-                LineWidget:new{ background = Blitbuffer.Color8(210), dimen = Geom:new{ w = MINDMAP_ACTION_DIVIDER, h = math.floor(MINDMAP_TOPBAR_H * 0.46) } }
+            actions[#actions+1] = CenterContainer:new{ dimen = Geom:new{ w = C.MAP.MINDMAP_ACTION_DIVIDER, h = C.MAP.MINDMAP_TOPBAR_H },
+                LineWidget:new{ background = Blitbuffer.Color8(210), dimen = Geom:new{ w = C.MAP.MINDMAP_ACTION_DIVIDER, h = math.floor(C.MAP.MINDMAP_TOPBAR_H * 0.46) } }
             }
-            x = x + MINDMAP_ACTION_DIVIDER
+            x = x + C.MAP.MINDMAP_ACTION_DIVIDER
         end
         self.top_zones[item.name] = { x0 = x, x1 = x + item.w }
-        actions[#actions+1] = CenterContainer:new{ dimen = Geom:new{ w = item.w, h = MINDMAP_TOPBAR_H },
+        actions[#actions+1] = CenterContainer:new{ dimen = Geom:new{ w = item.w, h = C.MAP.MINDMAP_TOPBAR_H },
             item.icon and IconWidget:new{ icon = item.icon, width = Screen:scaleBySize(29), height = Screen:scaleBySize(29) }
                 or TextWidget:new{ text = item.text, face = action_face, fgcolor = Blitbuffer.COLOR_BLACK } }
         x = x + item.w
     end
     local content = HorizontalGroup:new{ align = "center",
-        CenterContainer:new{ dimen = Geom:new{ w = MDEDIT_MENU_W, h = MINDMAP_TOPBAR_H },
+        CenterContainer:new{ dimen = Geom:new{ w = C.EDIT.MDEDIT_MENU_W, h = C.MAP.MINDMAP_TOPBAR_H },
             IconWidget:new{ icon = "appbar.menu", width = Screen:scaleBySize(24), height = Screen:scaleBySize(24) } },
-        HorizontalSpan:new{ width = MINDMAP_MENU_TITLE_GAP },
-        CenterContainer:new{ dimen = Geom:new{ w = title_w, h = MINDMAP_TOPBAR_H },
+        HorizontalSpan:new{ width = C.MAP.MINDMAP_MENU_TITLE_GAP },
+        CenterContainer:new{ dimen = Geom:new{ w = title_w, h = C.MAP.MINDMAP_TOPBAR_H },
             TextWidget:new{ text = title, face = title_face, fgcolor = Blitbuffer.Color8(110) } },
         HorizontalSpan:new{ width = gap_w },
         HorizontalGroup:new(actions),
     }
     local padded = HorizontalGroup:new{ align = "center",
-        HorizontalSpan:new{ width = MINDMAP_TOPBAR_PAD_X }, content,
-        HorizontalSpan:new{ width = MINDMAP_TOPBAR_PAD_RIGHT } }
-    return CenterContainer:new{ dimen = Geom:new{ w = cw + MINDMAP_TOPBAR_PAD_X + MINDMAP_TOPBAR_PAD_RIGHT, h = MINDMAP_TOPBAR_H + MINDMAP_TOPBAR_TOP_PAD }, padded }
+        HorizontalSpan:new{ width = C.MAP.MINDMAP_TOPBAR_PAD_X }, content,
+        HorizontalSpan:new{ width = C.MAP.MINDMAP_TOPBAR_PAD_RIGHT } }
+    return CenterContainer:new{ dimen = Geom:new{ w = cw + C.MAP.MINDMAP_TOPBAR_PAD_X + C.MAP.MINDMAP_TOPBAR_PAD_RIGHT, h = C.MAP.MINDMAP_TOPBAR_H + C.MAP.MINDMAP_TOPBAR_TOP_PAD }, padded }
 end
 
 function MindmapView:rebuild()
-    local cw = self.fw - (MINDMAP_PAD * 2)
-    local topbar = self:topBar(self.fw - MINDMAP_TOPBAR_PAD_X - MINDMAP_TOPBAR_PAD_RIGHT)
-    local canvas_h = self.fh - self.canvas_y - MINDMAP_PAD
+    local cw = self.fw - (C.MAP.MINDMAP_PAD * 2)
+    local topbar = self:topBar(self.fw - C.MAP.MINDMAP_TOPBAR_PAD_X - C.MAP.MINDMAP_TOPBAR_PAD_RIGHT)
+    local canvas_h = self.fh - self.canvas_y - C.MAP.MINDMAP_PAD
     local canvas = MindmapCanvas:new{ map = self, dimen = Geom:new{ w = cw, h = canvas_h } }
-    local vg = VerticalGroup:new{ align = "left", topbar, VerticalSpan:new{ width = MINDMAP_TOPBAR_GAP },
+    local vg = VerticalGroup:new{ align = "left", topbar, VerticalSpan:new{ width = C.MAP.MINDMAP_TOPBAR_GAP },
         CenterContainer:new{ dimen = Geom:new{ w = self.fw, h = canvas_h }, canvas } }
     self[1] = FrameContainer:new{ background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0,
         width = self.fw, height = self.fh, vg }
@@ -1488,7 +1313,7 @@ function MindmapView:onTap(_, ges)
     if not p then return true end
     if self.editing_index then self:commitNodeEdit() end
     if p.y < 95 then
-        local x = p.x - MINDMAP_TOPBAR_PAD_X
+        local x = p.x - C.MAP.MINDMAP_TOPBAR_PAD_X
         for name, z in pairs(self.top_zones or {}) do
             if x >= z.x0 and x < z.x1 then
                 if name == "menu" then self:openControls()
@@ -1504,10 +1329,10 @@ function MindmapView:onTap(_, ges)
     end
     local hit = self:nodeAt(p)
     if hit ~= nil then
-        local now = now_seconds()
+        local now = IO.now_seconds()
         local last = self._last_node_tap
-        if hit > 0 and last and last.index == hit and now - last.t < MINDMAP_EDIT_DTAP
-            and math.abs(p.x - last.x) < MINDMAP_EDIT_DTAP_MOVE and math.abs(p.y - last.y) < MINDMAP_EDIT_DTAP_MOVE then
+        if hit > 0 and last and last.index == hit and now - last.t < C.MAP.MINDMAP_EDIT_DTAP
+            and math.abs(p.x - last.x) < C.MAP.MINDMAP_EDIT_DTAP_MOVE and math.abs(p.y - last.y) < C.MAP.MINDMAP_EDIT_DTAP_MOVE then
             self._last_node_tap = nil
             self:beginNodeEdit(hit)
         else
@@ -1532,15 +1357,15 @@ function MindmapView:onPan(_, ges)
     local dx, dy = p.x - sp.x, p.y - sp.y
     local horizontal = math.abs(dx) >= math.abs(dy)
     local distance = horizontal and dx or dy
-    local steps = math.floor(math.abs(distance) / MINDMAP_PAN_GESTURE)
+    local steps = math.floor(math.abs(distance) / C.MAP.MINDMAP_PAN_GESTURE)
     local direction = distance < 0 and -1 or 1
     local signature = (horizontal and "x" or "y") .. direction
     if self._pan_signature ~= signature then self._pan_signature, self._pan_moved = signature, false end
     -- Panning is intentionally coarse, like zoom: one small, predictable move
     -- per swipe rather than a viewport-sized jump for every gesture update.
     if steps > 0 and not self._pan_moved then
-        if horizontal then self.pan_x = self.pan_x + direction * MINDMAP_PAN_STEP
-        else self.pan_y = self.pan_y + direction * MINDMAP_PAN_STEP end
+        if horizontal then self.pan_x = self.pan_x + direction * C.MAP.MINDMAP_PAN_STEP
+        else self.pan_y = self.pan_y + direction * C.MAP.MINDMAP_PAN_STEP end
         self:clampPan()
         self._pan_moved = true
         self:refresh()
@@ -1555,10 +1380,10 @@ end
 
 function MindmapView:zoomAt(pos, factor)
     local old = self.zoom
-    local new = math.max(MINDMAP_MIN_ZOOM, math.min(MINDMAP_MAX_ZOOM, old * factor))
+    local new = math.max(C.MAP.MINDMAP_MIN_ZOOM, math.min(C.MAP.MINDMAP_MAX_ZOOM, old * factor))
     if new == old then return end
-    local cx = pos and (pos.x - MINDMAP_PAD) or (self.fw - MINDMAP_PAD * 2) / 2
-    local cy = pos and (pos.y - self.canvas_y) or (self.fh - self.canvas_y - MINDMAP_PAD) / 2
+    local cx = pos and (pos.x - C.MAP.MINDMAP_PAD) or (self.fw - C.MAP.MINDMAP_PAD * 2) / 2
+    local cy = pos and (pos.y - self.canvas_y) or (self.fh - self.canvas_y - C.MAP.MINDMAP_PAD) / 2
     local wx, wy = (cx - self.pan_x) / old, (cy - self.pan_y) / old
     self.zoom = new
     self.pan_x, self.pan_y = cx - wx * new, cy - wy * new
@@ -1581,9 +1406,9 @@ function MindmapView:centerSelected()
     local entry = self:selectedEntry()
     if not entry then return end
     local n = entry.node
-    local vw, vh = self.fw - MINDMAP_PAD * 2, self.fh - self.canvas_y - MINDMAP_PAD
+    local vw, vh = self.fw - C.MAP.MINDMAP_PAD * 2, self.fh - self.canvas_y - C.MAP.MINDMAP_PAD
     self.pan_x = vw / 2 - (n.mx + n.mw / 2) * self.zoom
-    self.pan_y = vh / 2 - (n.my + MINDMAP_NODE_H / 2) * self.zoom
+    self.pan_y = vh / 2 - (n.my + C.MAP.MINDMAP_NODE_H / 2) * self.zoom
     self:clampPan()
 end
 
@@ -1630,7 +1455,7 @@ function MindmapView:onScreenResize()
             for _, range in ipairs(ev) do range.range = self.dimen end
         end
     end
-    self.canvas_y = MINDMAP_TOPBAR_H + MINDMAP_TOPBAR_TOP_PAD + MINDMAP_TOPBAR_GAP
+    self.canvas_y = C.MAP.MINDMAP_TOPBAR_H + C.MAP.MINDMAP_TOPBAR_TOP_PAD + C.MAP.MINDMAP_TOPBAR_GAP
     self:refresh()
     return true
 end
@@ -1679,7 +1504,7 @@ function MDEdit:init()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh }
     self.covers_fullscreen = true
-    self.scale = clamp_minfolio_scale(MINFOLIO_STATE.scale)
+    self.scale = State.clamp_minfolio_scale(State.MINFOLIO_STATE.scale)
     self.parent = self            -- VirtualKeyboard reads inputbox.parent
     self.keyboard = nil
     self._wcache = {}             -- measured word widths (style|scale|text -> px)
@@ -1688,12 +1513,12 @@ function MDEdit:init()
     self.caret_on = true
     self._caret_blinking = true
     self.reader_mode = false
-    local text = read_file(self.path) or ""
+    local text = IO.read_file(self.path) or ""
     self.lines = Text.split_text_lines(text)
     -- The editor never owns a socket. A separate process does TLS and leaves
     -- only local, atomically-written files for this widget to consume.
     self.remote_revision = self.remote and tonumber(self.remote.revision) or 0
-    self._file_signature = file_signature(self.path)
+    self._file_signature = IO.file_signature(self.path)
     self._file_text = text
     self.crow, self.ccol, self.top, self.vtop = 1, 0, 1, 1
     self:restorePosition()
@@ -1719,7 +1544,7 @@ function MDEdit:init()
     -- file browser.  Do not let the caret's tiny partial redraw race it: on an
     -- e-ink screen that can preserve a blank patch from the browser instead of
     -- the newly-built editor beneath it.
-    self:scheduleCaretBlink(MDEDIT_CARET_RESUME_DELAY)
+    self:scheduleCaretBlink(C.EDIT.MDEDIT_CARET_RESUME_DELAY)
     self:scheduleFilePoll()
     MinfolioPair.trace("editor-open", "path=", tostring(self.path), "lines=", #self.lines,
         "remote=", self.remote and "yes" or "no")
@@ -1730,7 +1555,7 @@ end
 -- changed how many screen rows the preceding text occupies.
 function MDEdit:restorePosition()
     if self.remote then return end -- remote documents are short-lived session shadows
-    local position = MINFOLIO_STATE.positions[self.path]
+    local position = State.MINFOLIO_STATE.positions[self.path]
     if type(position) ~= "table" then return end
 
     self.crow = math.max(1, math.min(#self.lines, math.floor(tonumber(position.crow) or 1)))
@@ -1758,7 +1583,7 @@ function MDEdit:savePosition()
     if self.remote then return end
     local rows = self:visualRows(self:textWidth())
     local top = rows[math.max(1, math.min(#rows, self.vtop or 1))] or {}
-    MINFOLIO_STATE.positions[self.path] = {
+    State.MINFOLIO_STATE.positions[self.path] = {
         line = top.line or self.crow or 1,
         ri = top.ri or 1,
         kind = top.kind or "row",
@@ -1766,7 +1591,7 @@ function MDEdit:savePosition()
         ccol = self.ccol or 0,
         reader_mode = self.reader_mode,
     }
-    save_minfolio_state()
+    State.save_minfolio_state()
 end
 -- a thin caret bar that sits between styled spans without disturbing them
 function MDEdit:caret(h)
@@ -1798,7 +1623,7 @@ function MDEdit:scheduleCaretBlink(delay)
             region = self:unionRegion(prev_caret, self.caret_region)
         end
         local dirty_full = false
-        if self._last_dirty_at and now_seconds() - self._last_dirty_at < MDEDIT_CARET_BLINK then
+        if self._last_dirty_at and IO.now_seconds() - self._last_dirty_at < C.EDIT.MDEDIT_CARET_BLINK then
             if self._last_dirty_full then
                 dirty_full = true
                 region = nil
@@ -1810,7 +1635,7 @@ function MDEdit:scheduleCaretBlink(delay)
         self:scheduleCaretBlink()
     end
     self._caret_blink_pending = fn
-    UIManager:scheduleIn(delay or MDEDIT_CARET_BLINK, fn)
+    UIManager:scheduleIn(delay or C.EDIT.MDEDIT_CARET_BLINK, fn)
 end
 -- Keep a solid caret throughout an input burst. Besides being easier to follow,
 -- this prevents the blink timer from doing a second full widget rebuild while a
@@ -1819,7 +1644,7 @@ end
 function MDEdit:pauseCaretBlinkForInput()
     if not self._caret_blinking or self.reader_mode then return end
     self.caret_on = true
-    self:scheduleCaretBlink(MDEDIT_CARET_RESUME_DELAY)
+    self:scheduleCaretBlink(C.EDIT.MDEDIT_CARET_RESUME_DELAY)
 end
 function MDEdit:textw(txt, face)        -- measured rendered width of a string
     if txt == "" then return 0 end
@@ -1830,7 +1655,7 @@ function MDEdit:texth(style)
     local key = style .. "|" .. self.scale
     local c = self._hcache[key]
     if c then return c end
-    local tw = TextWidget:new{ text = "Hg", face = md_face(style, self.scale) }
+    local tw = TextWidget:new{ text = "Hg", face = Style.md_face(style, self.scale) }
     local h = tw:getSize().h; tw:free()
     self._hcache[key] = h; return h
 end
@@ -1839,7 +1664,7 @@ function MDEdit:wordw(txt, style)        -- cached measured width (keyed by styl
     local key = style .. "|" .. self.scale .. "|" .. txt
     local c = self._wcache[key]
     if c then return c end
-    local w = self:textw(txt, md_face(style, self.scale))
+    local w = self:textw(txt, Style.md_face(style, self.scale))
     self._wcache[key] = w; return w
 end
 function MDEdit:rowTextHeight(row)
@@ -1850,7 +1675,7 @@ function MDEdit:rowTextHeight(row)
 end
 function MDEdit:rowHeight(row, block)
     local measured = self:rowTextHeight(row)
-    return math.max(1, math.ceil(measured * MDEDIT_LINE_HEIGHT)) + math.max(0, math.floor(MDEDIT_LINE_GAP * self.scale))
+    return math.max(1, math.ceil(measured * C.EDIT.MDEDIT_LINE_HEIGHT)) + math.max(0, math.floor(C.EDIT.MDEDIT_LINE_GAP * self.scale))
 end
 function MDEdit:trimToWidth(text, maxw, face)
     if self:textw(text, face) <= maxw then return text end
@@ -1864,14 +1689,14 @@ function MDEdit:trimToWidth(text, maxw, face)
     return best
 end
 function MDEdit:toolCell(lbl, fnt, sz, w)
-    w = w or MDEDIT_TOOL_MIN_CELL
+    w = w or C.EDIT.MDEDIT_TOOL_MIN_CELL
     return FrameContainer:new{ bordersize = 0, padding = 0, margin = 0,
-        CenterContainer:new{ dimen = Geom:new{ w = w, h = MDEDIT_TOPBAR_H },
+        CenterContainer:new{ dimen = Geom:new{ w = w, h = C.EDIT.MDEDIT_TOPBAR_H },
             TextWidget:new{ text = lbl, face = Font:getFace(fnt or "tfont", sz or 24), fgcolor = Blitbuffer.COLOR_BLACK } } }
 end
 function MDEdit:toolDivider()
-    return CenterContainer:new{ dimen = Geom:new{ w = MDEDIT_TOOL_DIVIDER, h = MDEDIT_TOPBAR_H },
-        LineWidget:new{ background = Blitbuffer.Color8(205), dimen = Geom:new{ w = MDEDIT_TOOL_DIVIDER, h = math.floor(MDEDIT_TOPBAR_H * 0.62) } } }
+    return CenterContainer:new{ dimen = Geom:new{ w = C.EDIT.MDEDIT_TOOL_DIVIDER, h = C.EDIT.MDEDIT_TOPBAR_H },
+        LineWidget:new{ background = Blitbuffer.Color8(205), dimen = Geom:new{ w = C.EDIT.MDEDIT_TOOL_DIVIDER, h = math.floor(C.EDIT.MDEDIT_TOPBAR_H * 0.62) } } }
 end
 function MDEdit:progressBar(width)
     local visual_count = self.visual_count or #self.lines
@@ -1886,13 +1711,13 @@ function MDEdit:progressBar(width)
     if filled > 0 then
         parts[#parts+1] = LineWidget:new{
             background = Blitbuffer.COLOR_BLACK,
-            dimen = Geom:new{ w = filled, h = MDEDIT_PROGRESS_H },
+            dimen = Geom:new{ w = filled, h = C.EDIT.MDEDIT_PROGRESS_H },
         }
     end
     if filled < w then
         parts[#parts+1] = LineWidget:new{
             background = Blitbuffer.Color8(205),
-            dimen = Geom:new{ w = w - filled, h = MDEDIT_PROGRESS_H },
+            dimen = Geom:new{ w = w - filled, h = C.EDIT.MDEDIT_PROGRESS_H },
         }
     end
     return HorizontalGroup:new(parts)
@@ -1900,7 +1725,7 @@ end
 function MDEdit:menuGlyph()
     -- Same "appbar.menu" icon KOReader's own title bars use, so this matches
     -- the hamburger on the file-listing screen instead of a hand-drawn glyph.
-    return CenterContainer:new{ dimen = Geom:new{ w = MDEDIT_MENU_W, h = MDEDIT_TOPBAR_H },
+    return CenterContainer:new{ dimen = Geom:new{ w = C.EDIT.MDEDIT_MENU_W, h = C.EDIT.MDEDIT_TOPBAR_H },
         IconWidget:new{ icon = "appbar.menu", width = Screen:scaleBySize(24), height = Screen:scaleBySize(24) } }
 end
 function MDEdit:buildTopBar(cw)
@@ -1912,9 +1737,9 @@ function MDEdit:buildTopBar(cw)
     -- targets instead of obscuring the document with a dialog.
     if self._find_bar_visible then
         local action_face = Font:getFace("tfont", 21)
-        local prev_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Previous", action_face) + 18)
-        local next_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Next", action_face) + 18)
-        local done_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Done", action_face) + 18)
+        local prev_w = math.max(C.EDIT.MDEDIT_TOOL_MIN_CELL, self:textw("Previous", action_face) + 18)
+        local next_w = math.max(C.EDIT.MDEDIT_TOOL_MIN_CELL, self:textw("Next", action_face) + 18)
+        local done_w = math.max(C.EDIT.MDEDIT_TOOL_MIN_CELL, self:textw("Done", action_face) + 18)
         local query_w = math.max(80, cw - prev_w - next_w - done_w)
         local query = self:trimToWidth((self._find_query and self._find_query ~= "")
             and ("Find: " .. self._find_query) or "Find: enter text", query_w - 16, title_face)
@@ -1924,8 +1749,8 @@ function MDEdit:buildTopBar(cw)
         self.top_zones.find_next = { x0 = x, x1 = x + next_w }; x = x + next_w
         self.top_zones.find_done = { x0 = x, x1 = x + done_w }
         return HorizontalGroup:new{ align = "center",
-            FrameContainer:new{ bordersize = 1, padding = 5, margin = 0, width = query_w, height = MDEDIT_TOPBAR_H,
-                CenterContainer:new{ dimen = Geom:new{ w = query_w - 12, h = MDEDIT_TOPBAR_H - 2 },
+            FrameContainer:new{ bordersize = 1, padding = 5, margin = 0, width = query_w, height = C.EDIT.MDEDIT_TOPBAR_H,
+                CenterContainer:new{ dimen = Geom:new{ w = query_w - 12, h = C.EDIT.MDEDIT_TOPBAR_H - 2 },
                     TextWidget:new{ text = query, face = title_face, fgcolor = Blitbuffer.COLOR_BLACK } } },
             self:toolCell("Previous", "tfont", 21, prev_w),
             self:toolCell("Next", "tfont", 21, next_w),
@@ -1936,39 +1761,39 @@ function MDEdit:buildTopBar(cw)
         -- Reader mode: no formatting toolbar. A single explicit "Edit" button so
         -- the reader never has to guess the double-tap gesture.
         local edit_face = Font:getFace("tfont", 24)
-        local edit_w = math.max(MDEDIT_TOOL_MIN_CELL, self:textw("Edit", edit_face) + 28)
-        local max_title_w = math.max(80, cw - MDEDIT_MENU_W - edit_w - MDEDIT_TITLE_ACTION_GAP)
+        local edit_w = math.max(C.EDIT.MDEDIT_TOOL_MIN_CELL, self:textw("Edit", edit_face) + 28)
+        local max_title_w = math.max(80, cw - C.EDIT.MDEDIT_MENU_W - edit_w - C.EDIT.MDEDIT_TITLE_ACTION_GAP)
         local title = self:trimToWidth(raw_title, max_title_w, title_face)
         local title_w = self:textw(title, title_face)
-        local gap_w = math.max(MDEDIT_TITLE_ACTION_GAP, cw - MDEDIT_MENU_W - title_w - edit_w)
-        local x = MDEDIT_MENU_W
-        self.top_zones.menu = { x0 = 0, x1 = MDEDIT_MENU_W }
+        local gap_w = math.max(C.EDIT.MDEDIT_TITLE_ACTION_GAP, cw - C.EDIT.MDEDIT_MENU_W - title_w - edit_w)
+        local x = C.EDIT.MDEDIT_MENU_W
+        self.top_zones.menu = { x0 = 0, x1 = C.EDIT.MDEDIT_MENU_W }
         x = x + title_w + gap_w
         self.top_zones.edit = { x0 = x, x1 = x + edit_w }
         return HorizontalGroup:new{ align = "center",
             self:menuGlyph(),
-            CenterContainer:new{ dimen = Geom:new{ w = title_w, h = MDEDIT_TOPBAR_H },
+            CenterContainer:new{ dimen = Geom:new{ w = title_w, h = C.EDIT.MDEDIT_TOPBAR_H },
                 TextWidget:new{ text = title, face = title_face, fgcolor = Blitbuffer.Color8(110) } },
             HorizontalSpan:new{ width = gap_w },
-            CenterContainer:new{ dimen = Geom:new{ w = edit_w, h = MDEDIT_TOPBAR_H },
+            CenterContainer:new{ dimen = Geom:new{ w = edit_w, h = C.EDIT.MDEDIT_TOPBAR_H },
                 TextWidget:new{ text = "Edit", face = edit_face, fgcolor = Blitbuffer.COLOR_BLACK } },
         }
     end
     -- Reader glyph is a rectangle split into two columns (◫, vertical bisecting
     -- line) so it reads as a two-column page rather than many thin bars.
     local tools = { "H", "B", "I", "\226\128\162", "1.", "\226\152\144", "\226\151\171" }
-    local divider_w = #tools * MDEDIT_TOOL_DIVIDER
-    local min_action_w = ((#tools + 1) * MDEDIT_TOOL_MIN_CELL) + divider_w
-    local max_title_w = math.min(MDEDIT_TITLE_W, math.max(80, cw - MDEDIT_MENU_W - min_action_w - MDEDIT_TITLE_ACTION_GAP))
+    local divider_w = #tools * C.EDIT.MDEDIT_TOOL_DIVIDER
+    local min_action_w = ((#tools + 1) * C.EDIT.MDEDIT_TOOL_MIN_CELL) + divider_w
+    local max_title_w = math.min(C.EDIT.MDEDIT_TITLE_W, math.max(80, cw - C.EDIT.MDEDIT_MENU_W - min_action_w - C.EDIT.MDEDIT_TITLE_ACTION_GAP))
     local title = self:trimToWidth(raw_title, max_title_w, title_face)
     local title_w = self:textw(title, title_face)
-    local gap_w = math.min(MDEDIT_TITLE_ACTION_GAP, math.max(0, cw - MDEDIT_MENU_W - title_w - min_action_w))
-    local action_w = math.max(min_action_w, cw - MDEDIT_MENU_W - title_w - gap_w)
-    local tool_cell_w = math.max(MDEDIT_TOOL_MIN_CELL, math.floor((action_w - divider_w) / (#tools + 1)))
+    local gap_w = math.min(C.EDIT.MDEDIT_TITLE_ACTION_GAP, math.max(0, cw - C.EDIT.MDEDIT_MENU_W - title_w - min_action_w))
+    local action_w = math.max(min_action_w, cw - C.EDIT.MDEDIT_MENU_W - title_w - gap_w)
+    local tool_cell_w = math.max(C.EDIT.MDEDIT_TOOL_MIN_CELL, math.floor((action_w - divider_w) / (#tools + 1)))
     action_w = tool_cell_w * (#tools + 1) + divider_w
-    local x = MDEDIT_MENU_W
-    self.top_zones.menu = { x0 = 0, x1 = MDEDIT_MENU_W }
-    local title_widget = CenterContainer:new{ dimen = Geom:new{ w = title_w, h = MDEDIT_TOPBAR_H },
+    local x = C.EDIT.MDEDIT_MENU_W
+    self.top_zones.menu = { x0 = 0, x1 = C.EDIT.MDEDIT_MENU_W }
+    local title_widget = CenterContainer:new{ dimen = Geom:new{ w = title_w, h = C.EDIT.MDEDIT_TOPBAR_H },
         TextWidget:new{ text = title, face = title_face, fgcolor = Blitbuffer.Color8(110) } }
     x = x + title_w + gap_w
     local tool_widgets = {}
@@ -1976,14 +1801,14 @@ function MDEdit:buildTopBar(cw)
     for i, lbl in ipairs(tools) do
         if i > 1 then
             tool_widgets[#tool_widgets+1] = self:toolDivider()
-            x = x + MDEDIT_TOOL_DIVIDER
+            x = x + C.EDIT.MDEDIT_TOOL_DIVIDER
         end
         self.top_zones[tool_names[i]] = { x0 = x, x1 = x + tool_cell_w }
         local glyph_tool = i == 6 or i == 8   -- checkbox + reader glyphs render from cfont
         tool_widgets[#tool_widgets+1] = self:toolCell(lbl, glyph_tool and "cfont" or "tfont", glyph_tool and 24 or 23, tool_cell_w)
         x = x + tool_cell_w
     end
-    x = x + MDEDIT_TOOL_DIVIDER
+    x = x + C.EDIT.MDEDIT_TOOL_DIVIDER
     self.top_zones.close = { x0 = x, x1 = x + tool_cell_w }
     return HorizontalGroup:new{ align = "center",
         self:menuGlyph(),
@@ -2018,8 +1843,8 @@ function MDEdit:pointToCursor(pos)
     for _, rm in ipairs(self.row_map or {}) do
         if pos.y >= rm.y0 and pos.y < rm.y1 then
             local raw_col
-            if rm.table then raw_col = self:tableColAtX(rm, pos.x - MDEDIT_PAD)
-            else raw_col = self:colAtX(rm.row, pos.x - MDEDIT_PAD) end
+            if rm.table then raw_col = self:tableColAtX(rm, pos.x - C.EDIT.MDEDIT_PAD)
+            else raw_col = self:colAtX(rm.row, pos.x - C.EDIT.MDEDIT_PAD) end
             local col = Text.utf8_snap(self.lines[rm.line], raw_col)
             return rm.line, col
         end
@@ -2030,8 +1855,8 @@ function MDEdit:pointToCursor(pos)
     end
     if nearest then
         local raw_col
-        if nearest.table then raw_col = self:tableColAtX(nearest, pos.x - MDEDIT_PAD)
-        else raw_col = self:colAtX(nearest.row, pos.x - MDEDIT_PAD) end
+        if nearest.table then raw_col = self:tableColAtX(nearest, pos.x - C.EDIT.MDEDIT_PAD)
+        else raw_col = self:colAtX(nearest.row, pos.x - C.EDIT.MDEDIT_PAD) end
         return nearest.line, Text.utf8_snap(self.lines[nearest.line], raw_col)
     end
     if pos.y < (self.row_map and self.row_map[1] and self.row_map[1].y0 or self.fh) then
@@ -2162,7 +1987,7 @@ function MDEdit:renderRow(row)
         if display == nil then display = seg.text end
         if display ~= "" then
             hg[#hg+1] = TextWidget:new{ text = display,
-                face = md_face(seg.style, self.scale), fgcolor = md_color(seg.style) }
+                face = Style.md_face(seg.style, self.scale), fgcolor = Style.md_color(seg.style) }
         end
     end
     row._rendered, row._rendered_scale = hg, self.scale
@@ -2236,7 +2061,7 @@ function MDEdit:wrapTableCell(text, base_style, maxw)
     return rows
 end
 function MDEdit:layoutTable(tbl, availw)
-    local pad_x = math.floor(MDEDIT_TABLE_PAD_X * self.scale)
+    local pad_x = math.floor(Style.MDEDIT_TABLE_PAD_X * self.scale)
     local pad_x2 = 2 * pad_x
     local minw = math.max(34, math.floor(42 * self.scale))
     -- Natural single-line width each column would like, so short columns can stay
@@ -2283,7 +2108,7 @@ function MDEdit:layoutTable(tbl, availw)
     local total = 0
     for c = 1, tbl.ncols do widths[c] = math.max(minw, widths[c]); total = total + widths[c] end
 
-    local pad_y = math.floor(MDEDIT_TABLE_PAD_Y * self.scale)
+    local pad_y = math.floor(Style.MDEDIT_TABLE_PAD_Y * self.scale)
     local entries = {}
     for ri, tr in ipairs(tbl.rows) do
         local style = tr.header and "bold" or "normal"
@@ -2315,7 +2140,7 @@ function MDEdit:layoutTable(tbl, availw)
     return entries
 end
 function MDEdit:tableCell(lines, colw, rowh, align)
-    local pad_x = math.floor(MDEDIT_TABLE_PAD_X * self.scale)
+    local pad_x = math.floor(Style.MDEDIT_TABLE_PAD_X * self.scale)
     local border = 1
     -- FrameContainer:getSize() ignores its own `width`/`height` and measures its
     -- content, so passing width=colw does NOT make a cell occupy the column -- the
@@ -2337,7 +2162,7 @@ function MDEdit:tableCell(lines, colw, rowh, align)
             if hstart and xend > hstart then
                 layers[#layers+1] = HorizontalGroup:new{ align = "top",
                     HorizontalSpan:new{ width = hstart },
-                    LineWidget:new{ background = MDEDIT_HIGHLIGHT_GRAY,
+                    LineWidget:new{ background = C.EDIT.MDEDIT_HIGHLIGHT_GRAY,
                         dimen = Geom:new{ w = math.max(2, xend - hstart), h = lineh } },
                 }
             end
@@ -2375,7 +2200,7 @@ function MDEdit:tableColAtX(rm, x)
     local hit = self:tableCellAtX(rm, x)
     if hit then
         local cell, w = hit.cell, hit.width
-        local pad_x = math.floor(MDEDIT_TABLE_PAD_X * self.scale)
+        local pad_x = math.floor(Style.MDEDIT_TABLE_PAD_X * self.scale)
         local inner_x = math.max(0, math.min(w - (2 * pad_x), hit.inner_x))
         local span = math.max(0, (cell.end_col or 0) - (cell.start_col or 0))
         if span <= 0 then return cell.start_col or 0 end
@@ -2393,7 +2218,7 @@ function MDEdit:tableCellAtX(rm, x)
         if x < acc + w then
             local cell = rm.cells and rm.cells[c]
             if not cell then return nil end
-            local pad_x = math.floor(MDEDIT_TABLE_PAD_X * self.scale)
+            local pad_x = math.floor(Style.MDEDIT_TABLE_PAD_X * self.scale)
             return {
                 line = rm.line,
                 col = c,
@@ -2412,7 +2237,7 @@ function MDEdit:tableCellAtPos(pos)
     if not pos then return nil end
     for _, rm in ipairs(self.row_map or {}) do
         if rm.table and pos.y >= rm.y0 and pos.y < rm.y1 then
-            return self:tableCellAtX(rm, pos.x - MDEDIT_PAD)
+            return self:tableCellAtX(rm, pos.x - C.EDIT.MDEDIT_PAD)
         end
     end
     return nil
@@ -2589,7 +2414,7 @@ function MDEdit:computeVisualRows(text_w)
             out[#out+1] = { kind = "row", line = i, row = row, block = entry.block, ri = ri }
         end
         if i < #self.lines then
-            out[#out+1] = { kind = "gap", line = i, h = MDEDIT_PARA_GAP }
+            out[#out+1] = { kind = "gap", line = i, h = C.EDIT.MDEDIT_PARA_GAP }
         end
     end
     local i = 1
@@ -2603,7 +2428,7 @@ function MDEdit:computeVisualRows(text_w)
                 out[#out+1] = entry
             end
             if tbl.finish < #self.lines then
-                out[#out+1] = { kind = "gap", line = tbl.finish, h = MDEDIT_PARA_GAP }
+                out[#out+1] = { kind = "gap", line = tbl.finish, h = C.EDIT.MDEDIT_PARA_GAP }
             end
             i = tbl.finish + 1
         else
@@ -2700,7 +2525,7 @@ function MDEdit:cursorVisual(vrows)
     return map[cri], cx
 end
 function MDEdit:textWidth()
-    return self.fw - (MDEDIT_PAD * 2)
+    return self.fw - (C.EDIT.MDEDIT_PAD * 2)
 end
 function MDEdit:moveCursorVisual(drow)
     local vrows = self:visualRows(self:textWidth())
@@ -2729,25 +2554,25 @@ function MDEdit:visualRowHeight(vr)
     return self:rowHeight(vr.row, vr.block)
 end
 function MDEdit:rebuild()
-    local cw = self.fw - (MDEDIT_PAD * 2)
+    local cw = self.fw - (C.EDIT.MDEDIT_PAD * 2)
     local text_w = self:textWidth()
     local topbar = self:topBar(cw)
-    local vg = VerticalGroup:new{ align = "left", topbar, VerticalSpan:new{ width = MDEDIT_TOPBAR_GAP } }
+    local vg = VerticalGroup:new{ align = "left", topbar, VerticalSpan:new{ width = C.EDIT.MDEDIT_TOPBAR_GAP } }
     local kbd_h = 0
     if self.keyboard then
         kbd_h = self.keyboard.dimen and self.keyboard.dimen.h or math.floor(self.fh * 0.36)
     end
-    local editor_top = MDEDIT_PAD + MDEDIT_TOPBAR_H + MDEDIT_TOPBAR_GAP
-    local progress_area = MDEDIT_PROGRESS_GAP + MDEDIT_PROGRESS_H
+    local editor_top = C.EDIT.MDEDIT_PAD + C.EDIT.MDEDIT_TOPBAR_H + C.EDIT.MDEDIT_TOPBAR_GAP
+    local progress_area = C.EDIT.MDEDIT_PROGRESS_GAP + C.EDIT.MDEDIT_PROGRESS_H
     -- The repaint area always runs from the top down to the keyboard's top edge
     -- (or the whole screen when no keyboard is up). Text, though, stops short of
     -- that: with the keyboard up the progress bar and the frame's bottom padding
     -- are hidden behind it and aren't needed, so text may run down to just above
-    -- the keyboard (leaving only MDEDIT_KBD_TEXT_GAP); otherwise it leaves room for
+    -- the keyboard (leaving only C.EDIT.MDEDIT_KBD_TEXT_GAP); otherwise it leaves room for
     -- the pinned progress bar and the bottom padding.
     local refresh_bottom = self.fh - kbd_h
-    local body_bottom = self.keyboard and (refresh_bottom - MDEDIT_KBD_TEXT_GAP)
-        or (self.fh - MDEDIT_PAD - progress_area)
+    local body_bottom = self.keyboard and (refresh_bottom - C.EDIT.MDEDIT_KBD_TEXT_GAP)
+        or (self.fh - C.EDIT.MDEDIT_PAD - progress_area)
     local budget = body_bottom - editor_top
     self.visible_budget = budget
     local body = VerticalGroup:new{ align = "left" }
@@ -2810,7 +2635,7 @@ function MDEdit:rebuild()
             local function flush_hl(xend)
                 if hstart and xend > hstart then
                     args[#args+1] = HorizontalGroup:new{ align = "top", HorizontalSpan:new{ width = hstart },
-                        LineWidget:new{ background = MDEDIT_HIGHLIGHT_GRAY, dimen = Geom:new{ w = math.max(2, xend - hstart), h = rowh } } }
+                        LineWidget:new{ background = C.EDIT.MDEDIT_HIGHLIGHT_GRAY, dimen = Geom:new{ w = math.max(2, xend - hstart), h = rowh } } }
                 end
                 hstart = nil
             end
@@ -2846,7 +2671,7 @@ function MDEdit:rebuild()
                     }
                 end
                 self.caret_region = Geom:new{
-                    x = MDEDIT_PAD + cursor_cx - 2, y = ytop + used + caret_y, w = 7, h = caret_h,
+                    x = C.EDIT.MDEDIT_PAD + cursor_cx - 2, y = ytop + used + caret_y, w = 7, h = caret_h,
                 }
             end
             body[#body+1] = OverlapGroup:new(args)
@@ -2876,7 +2701,7 @@ function MDEdit:rebuild()
     -- frees that strip for text.
     local layers = OverlapGroup:new{
         dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh },
-        FrameContainer:new{ background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = MDEDIT_PAD,
+        FrameContainer:new{ background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = C.EDIT.MDEDIT_PAD,
             width = self.fw, height = self.fh, vg },
     }
     if not self.keyboard then
@@ -3018,7 +2843,7 @@ function MDEdit:changedLineRegions(prev_row_map, row_map, row, prev_col, col)
                     local new_x = change_col >= new_sb and change_col <= new_rb
                         and self:previousGlyphX(after.row, change_col) or nil
                     local edit_x = old_x and new_x and math.min(old_x, new_x) or old_x or new_x or 0
-                    x = math.max(0, MDEDIT_PAD + edit_x - 2)
+                    x = math.max(0, C.EDIT.MDEDIT_PAD + edit_x - 2)
                 end
             end
             local y0 = math.max(0, math.min(before.y0, after.y0) - 2)
@@ -3205,7 +3030,7 @@ function MDEdit:refresh(opts)
     self._render_ccol = self.ccol
     self._render_sel_multiline = self:selectionIsMultiline()
     self._render_has_selection = has_selection
-    self._last_dirty_at = now_seconds()
+    self._last_dirty_at = IO.now_seconds()
     self._last_dirty_region = regions and self.caret_region or region
     self._last_dirty_full = not regions and region == nil
     if regions then
@@ -3225,21 +3050,21 @@ function MDEdit:refreshScroll()
 end
 function MDEdit:checkRemoteInbox()
     if not self.remote then return end
-    local revision = tonumber(read_file(self.remote.revision_path) or "")
+    local revision = tonumber(IO.read_file(self.remote.revision_path) or "")
     if not revision or revision <= (self.remote_revision or 0) then return end
     -- Preserve local Kindle changes until the worker has handed them off.
     if self._dirty or lfs.attributes(self.remote.outbox_path, "mode") then return end
-    local text = read_file(self.remote.inbox_path)
+    local text = IO.read_file(self.remote.inbox_path)
     if text == nil then return end
     self.remote_revision = revision
     if text == self:currentText() then return end
-    write_file(self.path, text)
+    IO.write_file(self.path, text)
     self.lines = Text.split_text_lines(text)
     self.crow = math.max(1, math.min(self.crow or 1, #self.lines))
     self.ccol = math.max(0, math.min(self.ccol or 0, #(self.lines[self.crow] or "")))
     self.sel, self._desired_x, self._burst = nil, nil, nil
     self._undo, self._redo = {}, {}
-    self._file_text, self._file_signature = text, file_signature(self.path)
+    self._file_text, self._file_signature = text, IO.file_signature(self.path)
     self:refresh{ layout_dirty = true, full = true }
 end
 function MDEdit:scheduleAutosave()
@@ -3252,7 +3077,7 @@ function MDEdit:scheduleAutosave()
         if self._dirty and not self._autosave_paused_for_external then self:save() end
     end
     self._autosave_pending = fn
-    UIManager:scheduleIn(MDEDIT_AUTOSAVE_DELAY, fn)
+    UIManager:scheduleIn(C.EDIT.MDEDIT_AUTOSAVE_DELAY, fn)
 end
 function MDEdit:flushAutosave()
     self:flushTypeBuffer()
@@ -3265,7 +3090,7 @@ function MDEdit:currentText()
     return table.concat(self.lines, "\n")
 end
 function MDEdit:reloadFromDisk(text, sig)
-    if text == nil then text = read_file(self.path) end
+    if text == nil then text = IO.read_file(self.path) end
     if text == nil then return false end
     self.lines = Text.split_text_lines(text)
     self.crow = math.max(1, math.min(self.crow or 1, #self.lines))
@@ -3276,7 +3101,7 @@ function MDEdit:reloadFromDisk(text, sig)
     self._undo, self._redo = {}, {}
     self._dirty = false
     self._file_text = text
-    self._file_signature = sig or file_signature(self.path)
+    self._file_signature = sig or IO.file_signature(self.path)
     self._external_change_prompted = nil
     self._autosave_paused_for_external = nil
     if self._autosave_pending then UIManager:unschedule(self._autosave_pending); self._autosave_pending = nil end
@@ -3296,9 +3121,9 @@ function MDEdit:promptExternalReload(text, sig)
     })
 end
 function MDEdit:checkExternalFile()
-    local sig = file_signature(self.path)
-    if same_file_signature(sig, self._file_signature) then return end
-    local text = read_file(self.path)
+    local sig = IO.file_signature(self.path)
+    if IO.same_file_signature(sig, self._file_signature) then return end
+    local text = IO.read_file(self.path)
     if text == nil then
         if not self._external_missing_notified then
             self._external_missing_notified = true
@@ -3331,7 +3156,7 @@ function MDEdit:scheduleFilePoll()
         self:scheduleFilePoll()
     end
     self._file_poll_pending = fn
-    UIManager:scheduleIn(MDEDIT_FILE_RELOAD_INTERVAL, fn)
+    UIManager:scheduleIn(C.EDIT.MDEDIT_FILE_RELOAD_INTERVAL, fn)
 end
 -- A heartbeat is intentionally infrequent.  If the UI loop is delayed, the
 -- next entry records the gap; if KOReader dies, the last marker identifies the
@@ -3345,7 +3170,7 @@ function MDEdit:scheduleHeartbeat(delay)
     fn = function()
         if self._heartbeat_pending == fn then self._heartbeat_pending = nil end
         if self._closing then return end
-        local now = now_seconds()
+        local now = IO.now_seconds()
         local gap = self._heartbeat_at and (now - self._heartbeat_at) or 0
         MinfolioPair.trace("editor-heartbeat", "path=", tostring(self.path),
             "gap=", string.format("%.2f", gap), "row=", self.crow or 0,
@@ -3517,7 +3342,7 @@ function MDEdit:insertTypedText(s)
             self.ccol = self.ccol + #ch
         end
     end
-    self._last_type_flush_at = now_seconds()
+    self._last_type_flush_at = IO.now_seconds()
     local incremental = not had_sel and self:updateVisualLine(self.crow)
     self:refresh{ layout_dirty = not incremental, precise_edit = not had_sel }
 end
@@ -3538,10 +3363,10 @@ function MDEdit:queueTypedChar(ch)
     -- The pending callback is never rescheduled by later keys, so fast input
     -- cannot defer rendering indefinitely.
     if self._type_flush_pending then return end
-    local now = now_seconds()
+    local now = IO.now_seconds()
     local first_in_burst = not self._last_type_flush_at
-        or now - self._last_type_flush_at >= MDEDIT_TYPE_BURST_IDLE
-    local delay = first_in_burst and MDEDIT_TYPE_FIRST_FLUSH_DELAY or MDEDIT_TYPE_FLUSH_DELAY
+        or now - self._last_type_flush_at >= C.EDIT.MDEDIT_TYPE_BURST_IDLE
+    local delay = first_in_burst and C.EDIT.MDEDIT_TYPE_FIRST_FLUSH_DELAY or C.EDIT.MDEDIT_TYPE_FLUSH_DELAY
     local fn
     fn = function()
         if self._type_flush_pending == fn then self._type_flush_pending = nil end
@@ -3996,8 +3821,8 @@ function MDEdit:isKeyboardRevealGesture(ges)
     local bottom_y = math.max(sp.y or 0, p.y or 0)
     local dy = (p.y or 0) - (sp.y or 0)
     local center = x >= self.fw * 0.36 and x <= self.fw * 0.64
-    local from_bottom = bottom_y >= self.fh - MDEDIT_KEYBOARD_SWIPE_EDGE
-    local upward = (ges.direction == "north") or dy <= -MDEDIT_KEYBOARD_SWIPE_DY
+    local from_bottom = bottom_y >= self.fh - C.EDIT.MDEDIT_KEYBOARD_SWIPE_EDGE
+    local upward = (ges.direction == "north") or dy <= -C.EDIT.MDEDIT_KEYBOARD_SWIPE_DY
     return center and from_bottom and upward
 end
 -- Inverse of the reveal gesture: a downward swipe that STARTS just above the
@@ -4018,8 +3843,8 @@ function MDEdit:isKeyboardHideGesture(ges)
     -- the event), then move clearly downward.  KOReader can label a diagonal or
     -- even mostly horizontal select-drag as "south", so do not trust its
     -- direction field without checking the actual displacement.
-    local near_kbd_top = start_y >= kbd_top - MDEDIT_KEYBOARD_SWIPE_EDGE and start_y <= kbd_top
-    local downward = dy >= MDEDIT_KEYBOARD_SWIPE_DY and math.abs(dy) >= math.abs(dx) * 1.25
+    local near_kbd_top = start_y >= kbd_top - C.EDIT.MDEDIT_KEYBOARD_SWIPE_EDGE and start_y <= kbd_top
+    local downward = dy >= C.EDIT.MDEDIT_KEYBOARD_SWIPE_DY and math.abs(dy) >= math.abs(dx) * 1.25
     return near_kbd_top and downward
 end
 function MDEdit:save()
@@ -4031,8 +3856,8 @@ function MDEdit:save()
         out:close()
         self._dirty = false
         self._file_text = text
-        self._file_signature = file_signature(self.path)
-        if self.remote then write_file(self.remote.outbox_path, text) end
+        self._file_signature = IO.file_signature(self.path)
+        if self.remote then IO.write_file(self.remote.outbox_path, text) end
         self._external_change_prompted = nil
         self._autosave_paused_for_external = nil
         if self._autosave_pending then UIManager:unschedule(self._autosave_pending); self._autosave_pending = nil end
@@ -4125,7 +3950,7 @@ function MDEdit:saveAndOpenMarkdown()
     self.keyboard = nil
     if keyboard then UIManager:close(keyboard) end
     UIManager:close(self)
-    if open_markdown_picker then open_markdown_picker(path_parent(self.path)) end
+    if open_markdown_picker then open_markdown_picker(Config.path_parent(self.path)) end
 end
 function MDEdit:onCloseWidget()
     MinfolioPair.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
@@ -4136,7 +3961,7 @@ function MDEdit:onCloseWidget()
     self:flushAutosave()
     self:savePosition()
     if self.remote then
-        write_file(self.remote.closing_path, "1")
+        IO.write_file(self.remote.closing_path, "1")
         -- `remote-session.lua` is a shared handoff owned by the desktop
         -- launcher.  A successor session may already have replaced it while
         -- this editor is closing; deleting it here races that launch and can
@@ -4285,9 +4110,9 @@ function MDEdit:onSwipe(_, ges)
     return true
 end
 function MDEdit:bumpScale(d)
-    self.scale = clamp_minfolio_scale(self.scale + d)
-    MINFOLIO_STATE.scale = self.scale
-    save_minfolio_state()
+    self.scale = State.clamp_minfolio_scale(self.scale + d)
+    State.MINFOLIO_STATE.scale = self.scale
+    State.save_minfolio_state()
     self._wcache = {}; self._hcache = {}
     if self._wrap_cache then
         for _, entry in pairs(self._wrap_cache) do free_wrap_entry(entry) end
@@ -4494,7 +4319,7 @@ function MDEdit:onTap(_, ges)
     -- Never let a key tap also fall through to the document underneath it.
     if self:isPointInKeyboard(p) then return true end
     if p.y < 95 then                                          -- top bar
-        local x = p.x - MDEDIT_PAD
+        local x = p.x - C.EDIT.MDEDIT_PAD
         for name, z in pairs(self.top_zones or {}) do
             if x >= z.x0 and x < z.x1 then self:runTopAction(name); return true end
         end
@@ -4517,8 +4342,8 @@ function MDEdit:onTap(_, ges)
         end
         -- Taps near the L/R/bottom edge are page-turns (likely scrolling), never
         -- an exit gesture -- page immediately, no double-tap delay.
-        if p.x < MDEDIT_READER_EDGE or p.x > self.fw - MDEDIT_READER_EDGE
-            or p.y > self.fh - MDEDIT_READER_EDGE then
+        if p.x < C.EDIT.MDEDIT_READER_EDGE or p.x > self.fw - C.EDIT.MDEDIT_READER_EDGE
+            or p.y > self.fh - C.EDIT.MDEDIT_READER_EDGE then
             self._rtap = nil
             if self._page_pending then UIManager:unschedule(self._page_pending); self._page_pending = nil end
             self:pageFromTap(p)
@@ -4529,8 +4354,8 @@ function MDEdit:onTap(_, ges)
             self:openTableCellEditor(table_hit)
             return true
         end
-        local now = now_seconds()
-        if self._rtap and now - self._rtap.t < MDEDIT_READER_DTAP
+        local now = IO.now_seconds()
+        if self._rtap and now - self._rtap.t < C.EDIT.MDEDIT_READER_DTAP
             and math.abs(p.x - self._rtap.x) < 40 and math.abs(p.y - self._rtap.y) < 40 then
             -- fast double tap: cancel the pending page turn, drop into edit mode
             -- with the cursor placed where the user tapped.
@@ -4549,7 +4374,7 @@ function MDEdit:onTap(_, ges)
             self:pageFromTap(pos)
         end
         self._page_pending = fn
-        UIManager:scheduleIn(MDEDIT_READER_DTAP, fn)
+        UIManager:scheduleIn(C.EDIT.MDEDIT_READER_DTAP, fn)
         return true
     end
     -- Tables render as tables in edit mode too, so a tap on a cell edits that
@@ -4559,11 +4384,11 @@ function MDEdit:onTap(_, ges)
         self:openTableCellEditor(table_hit)
         return true
     end
-    local now = now_seconds()
+    local now = IO.now_seconds()
     local tap_row, tap_col = self:pointToCursor(p)
-    if self._last_tap and now - self._last_tap.t < MDEDIT_EDIT_DTAP
-        and math.abs(p.x - self._last_tap.x) < MDEDIT_EDIT_DTAP_MOVE
-        and math.abs(p.y - self._last_tap.y) < MDEDIT_EDIT_DTAP_MOVE
+    if self._last_tap and now - self._last_tap.t < C.EDIT.MDEDIT_EDIT_DTAP
+        and math.abs(p.x - self._last_tap.x) < C.EDIT.MDEDIT_EDIT_DTAP_MOVE
+        and math.abs(p.y - self._last_tap.y) < C.EDIT.MDEDIT_EDIT_DTAP_MOVE
         and tap_row == self._last_tap.row
         and tap_col == self._last_tap.col then
         self._last_tap = nil
@@ -4583,8 +4408,8 @@ function MDEdit:onDoubleTap(_, ges)
     self._pan_mode = nil
     if self.reader_mode then
         local p = ges.pos
-        if p and p.y >= 95 and p.x >= MDEDIT_READER_EDGE and p.x <= self.fw - MDEDIT_READER_EDGE
-            and p.y <= self.fh - MDEDIT_READER_EDGE then
+        if p and p.y >= 95 and p.x >= C.EDIT.MDEDIT_READER_EDGE and p.x <= self.fw - C.EDIT.MDEDIT_READER_EDGE
+            and p.y <= self.fh - C.EDIT.MDEDIT_READER_EDGE then
             local table_hit = self:tableCellAtPos(p)
             if table_hit then
                 self:openTableCellEditor(table_hit)
@@ -4659,7 +4484,7 @@ function MDEdit:onPan(_, ges)
         end
         if self._pan_mode == "rpage" then return true end
         if not self._pan_mode then
-            if math.max(adx, ady) < MDEDIT_SELECT_PAN_MIN then return true end
+            if math.max(adx, ady) < C.EDIT.MDEDIT_SELECT_PAN_MIN then return true end
             if adx >= ady * 1.2 then
                 -- Horizontal-dominant start -> select text (to become a highlight).
                 self._pan_mode = "rselect"
@@ -4673,7 +4498,7 @@ function MDEdit:onPan(_, ges)
                 -- Vertical-dominant start -> page (one turn per drag, then latch).
                 self._pan_mode = "rpage"
                 self.sel = nil
-                if not self._pan_paged and ady >= MDEDIT_PAGE_PAN_MIN then
+                if not self._pan_paged and ady >= C.EDIT.MDEDIT_PAGE_PAN_MIN then
                     self._pan_paged = true
                     if dy < 0 then self:pageDown() else self:pageUp() end
                 end
@@ -4695,12 +4520,12 @@ function MDEdit:onPan(_, ges)
         return true
     end
     if not self._pan_mode then
-        if math.max(adx, ady) < MDEDIT_SELECT_PAN_MIN then return true end
+        if math.max(adx, ady) < C.EDIT.MDEDIT_SELECT_PAN_MIN then return true end
         if adx >= ady * 1.2 then
             self._pan_mode = "select"
             local sr, sc = self:pointToCursor(sp)
             self.sel = { row = sr, col = sc }
-        elseif ady >= MDEDIT_EDIT_SCROLL_PAN_MIN then
+        elseif ady >= C.EDIT.MDEDIT_EDIT_SCROLL_PAN_MIN then
             self._pan_mode = "scroll"
             self.sel = nil
         else
@@ -4847,7 +4672,7 @@ local function edit_note(path, remote)
     -- note's folder -- even when the note was opened by a send from the computer
     -- (launch flag), which otherwise would drop back to KOReader.
     local ed = MDEdit:new{ path = path, remote = remote, on_close = function()
-        if show_file_manager then show_file_manager(path_parent(path)) end
+        if show_file_manager then show_file_manager(Config.path_parent(path)) end
     end }
     active_mdedit = ed
     UIManager:show(ed, "full")   -- "full" forces a complete repaint over the menu
@@ -4871,10 +4696,10 @@ function MinfolioRemote.edit(descriptor_path)
         or type(cfg.token) ~= "string" or type(cfg.cert_fingerprint) ~= "string" then
         notify(_("Invalid secure desktop editing session")); return
     end
-    lfs.mkdir(STATE_DIR)
-    local expected_directory = MINFOLIO_REMOTE_DIR .. "/" .. cfg.session_id
+    lfs.mkdir(Config.STATE_DIR)
+    local expected_directory = Config.MINFOLIO_REMOTE_DIR .. "/" .. cfg.session_id
     if cfg.directory ~= expected_directory then notify(_("Invalid secure desktop editing session")); return end
-    lfs.mkdir(MINFOLIO_REMOTE_DIR); lfs.mkdir(cfg.directory)
+    lfs.mkdir(Config.MINFOLIO_REMOTE_DIR); lfs.mkdir(cfg.directory)
     local shadow = cfg.directory .. "/document.md"
     cfg.outbox_path = cfg.directory .. "/outbox.md"
     cfg.inbox_path = cfg.directory .. "/inbox.md"
@@ -4882,7 +4707,7 @@ function MinfolioRemote.edit(descriptor_path)
     cfg.closing_path = cfg.directory .. "/closing"
     -- The initial content arrives over the existing encrypted SSH launch command.
     -- It is written before MDEdit is constructed, so the editor never opens blank.
-    if not read_file(shadow) then write_file(shadow, type(cfg.content) == "string" and cfg.content or "") end
+    if not IO.read_file(shadow) then IO.write_file(shadow, type(cfg.content) == "string" and cfg.content or "") end
     edit_note(shadow, cfg)
 end
 
@@ -4955,8 +4780,8 @@ local function dir_entries(dir)
 end
 
 open_markdown_picker = function(start_dir)
-    local dir = start_dir or NOTES_DIR
-    if lfs.attributes(dir, "mode") ~= "directory" then dir = NOTES_DIR end
+    local dir = start_dir or Config.NOTES_DIR
+    if lfs.attributes(dir, "mode") ~= "directory" then dir = Config.NOTES_DIR end
     if lfs.attributes(dir, "mode") ~= "directory" then dir = "/mnt/us" end
 
     local dirs, all_files, ok = dir_entries(dir)
@@ -4966,9 +4791,9 @@ open_markdown_picker = function(start_dir)
     end
 
     local items = {}
-    if dir ~= "/" then items[#items+1] = { text = "../", kind = "dir", path = path_parent(dir) } end
-    if dir ~= NOTES_DIR and lfs.attributes(NOTES_DIR, "mode") == "directory" then
-        items[#items+1] = { text = _("Minfolio folder"), kind = "dir", path = NOTES_DIR }
+    if dir ~= "/" then items[#items+1] = { text = "../", kind = "dir", path = Config.path_parent(dir) } end
+    if dir ~= Config.NOTES_DIR and lfs.attributes(Config.NOTES_DIR, "mode") == "directory" then
+        items[#items+1] = { text = _("Minfolio folder"), kind = "dir", path = Config.NOTES_DIR }
     end
     for _, name in ipairs(dirs) do
         items[#items+1] = { text = name .. "/", kind = "dir", path = Text.path_join(dir, name) }
@@ -5043,7 +4868,7 @@ local function show_new_entry_dialog(menu, dir, kind)
                         notify(_("Could not create folder"))
                     end
                 else
-                    if write_file(path, "") then
+                    if IO.write_file(path, "") then
                         if menu then UIManager:close(menu) end
                         edit_note(path)
                     else
@@ -5133,9 +4958,9 @@ end
 
 show_file_manager = function(start_dir)
     fl_restore_if_needed()
-    ensure_dir(NOTES_DIR)
-    local dir = start_dir or NOTES_DIR
-    if lfs.attributes(dir, "mode") ~= "directory" then dir = NOTES_DIR end
+    ensure_dir(Config.NOTES_DIR)
+    local dir = start_dir or Config.NOTES_DIR
+    if lfs.attributes(dir, "mode") ~= "directory" then dir = Config.NOTES_DIR end
 
     local dirs, files, ok = dir_entries(dir)
     local menu
@@ -5144,7 +4969,7 @@ show_file_manager = function(start_dir)
         { text = "＋ " .. _("New folder"), kind = "new_folder" },
         { text = _("Open .md file..."), is_open = true },
     }
-    if dir ~= NOTES_DIR then items[#items+1] = { text = "../", kind = "dir_nav", path = path_parent(dir) } end
+    if dir ~= Config.NOTES_DIR then items[#items+1] = { text = "../", kind = "dir_nav", path = Config.path_parent(dir) } end
     for _, name in ipairs(dirs) do
         local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(dir, name) }
         item.hold_callback = function() show_item_actions(menu, dir, item) end
@@ -5160,7 +4985,7 @@ show_file_manager = function(start_dir)
     -- Custom title bar so we can show a Kindle-style battery indicator to the left
     -- of the close (X) icon. TitleBar only exposes a single right icon (the close
     -- button), so the battery is added as an extra right-aligned overlap child.
-    local title_text = _("Minfolio") .. " - " .. (dir == NOTES_DIR and Text.path_base(NOTES_DIR) or dir)
+    local title_text = _("Minfolio") .. " - " .. (dir == Config.NOTES_DIR and Text.path_base(Config.NOTES_DIR) or dir)
     local batt_info = battery_info()
     -- TitleBar knows about its close icon but not the extra battery widget we
     -- overlay on the right. Reserve that whole region in its title layout so a
@@ -5228,7 +5053,7 @@ show_file_manager = function(start_dir)
             { text = "＋ " .. _("New folder"), kind = "new_folder" },
             { text = _("Open .md file..."), is_open = true },
         }
-        if next_dir ~= NOTES_DIR then next_items[#next_items+1] = { text = "../", kind = "dir_nav", path = path_parent(next_dir) } end
+        if next_dir ~= Config.NOTES_DIR then next_items[#next_items+1] = { text = "../", kind = "dir_nav", path = Config.path_parent(next_dir) } end
         for _, name in ipairs(next_dirs) do
             local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(next_dir, name) }
             item.hold_callback = function() show_item_actions(self, next_dir, item) end
@@ -5241,7 +5066,7 @@ show_file_manager = function(start_dir)
         end
         if not readable then next_items[#next_items+1] = { text = _("Cannot read this folder"), kind = "noop" } end
         self._minfolio_dir = next_dir
-        local next_title = _("Minfolio") .. " - " .. (next_dir == NOTES_DIR and Text.path_base(NOTES_DIR) or next_dir)
+        local next_title = _("Minfolio") .. " - " .. (next_dir == Config.NOTES_DIR and Text.path_base(Config.NOTES_DIR) or next_dir)
         self:switchItemTable(next_title, next_items)
         logger.info("minfolio file manager navigated:", next_dir)
     end
@@ -5293,7 +5118,7 @@ show_file_manager = function(start_dir)
 end
 
 local function open_notes()
-    show_file_manager(NOTES_DIR)
+    show_file_manager(Config.NOTES_DIR)
 end
 
 -- ============================ Plugin ============================
@@ -5351,7 +5176,7 @@ function Minfolio:onDispatcherRegisterActions()
 end
 
 function Minfolio:init()
-    MinfolioPair.trace("plugin-init", "notes_dir=", NOTES_DIR)
+    MinfolioPair.trace("plugin-init", "notes_dir=", Config.NOTES_DIR)
     install_keyboard_aliases()
     MinfolioPair.start()
     self:onDispatcherRegisterActions()
