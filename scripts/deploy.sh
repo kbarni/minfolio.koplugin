@@ -10,8 +10,8 @@
 #
 # Why glob instead of a fixed file list: a Lua syntax error makes KOReader
 # silently skip the WHOLE plugin -- no dialog, nothing the user sees -- and
-# an upcoming refactor takes this plugin from ~4 files to ~14. A hardcoded
-# file list is exactly the kind of check a new module can silently escape.
+# the module split took this plugin from 4 files to over 20. A hardcoded file
+# list is exactly the kind of check a new module can silently escape.
 # See PLAN.md section 8 and section 6.3.
 #
 # Usage: scripts/deploy.sh [ssh-host]
@@ -67,7 +67,7 @@ say "== GGET global-read lint =="
 # verified empirically with `luajit -bl <file> | grep GGET` (do not extend
 # this by guessing -- if a future module needs another stdlib global, add it
 # here with the same evidence). Covers main.lua, minfolio_sync.lua, _meta.lua.
-GGET_STDLIB="_G arg assert debug dofile io ipairs math os pairs pcall require select string table tonumber tostring type unpack"
+GGET_STDLIB="_G arg assert debug dofile io ipairs math os pairs pcall rawget require select string table tonumber tostring type unpack"
 
 # The lint globs *.lua, which includes the *_test.lua files arriving with the
 # Tier 0 modules in work package C. Off-device tests legitimately read two more
@@ -94,12 +94,11 @@ GGET_TESTS="print package"
 # that, which is why the list is empty rather than merely short.
 GGET_MINFOLIO=""
 
-# Empty, and it should stay that way. This lint found one real bug on its
-# first run: main.lua:170-171 called notify() from a callback written before
-# `local function notify` at main.lua:925, so the reference compiled to a nil
-# global read and desktop pairing threw on its success path. Fixed by
-# inlining the Notification call at both sites. Add a name here only with a
-# written justification and a plan to remove it.
+# Empty, and it should stay that way. This lint found a real bug on its very
+# first run against existing code: notify() was called from a callback written
+# 755 lines before `local function notify`, so it compiled to a nil global
+# read and desktop pairing threw on its success path. Add a name here only
+# with a written justification and a plan to remove it.
 GGET_KNOWN_BUGS=""
 
 GGET_ALLOWLIST="$GGET_STDLIB $GGET_TESTS $GGET_MINFOLIO $GGET_KNOWN_BUGS"
@@ -121,10 +120,10 @@ done
 [ "$gget_bad" -eq 0 ] || die "GGET lint failed -- a moved/renamed symbol may have become a silent global read (PLAN.md section 6.3)"
 say "   OK ($(printf '%s\n' $GGET_ALLOWLIST | wc -l | tr -d ' ') names allowlisted)"
 
-# Off-device test suite (PLAN.md section 7): none exist yet -- Tier 0 modules
-# and their tests arrive in a later work package -- so this must handle a
-# glob matching nothing cleanly rather than trying to run a literal
-# "*_test.lua" as a file.
+# Off-device test suite (PLAN.md section 7). Only the KOReader-free Tier 0
+# modules can be tested this way; everything else needs a device. The
+# empty-glob case is still handled, so removing every test file degrades to a
+# skip rather than trying to run a literal "*_test.lua".
 say "== off-device tests =="
 t_count=0
 for t in "$PLUGIN_LOCAL"/*_test.lua; do
