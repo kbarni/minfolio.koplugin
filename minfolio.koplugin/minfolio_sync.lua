@@ -111,10 +111,43 @@ local function recover_and_cleanup()
     os.execute("rm -rf " .. string.format("%q", cfg.directory))
 end
 
+-- The worker must give up. Before this, the loop was `submit(); fetch();
+-- sleep(0.6)` forever, with no failure counter and no backoff -- the only
+-- exits were `stopped` from a 200 snapshot or the `closing` file. A 401
+-- (session deleted, desktop restarted, tunnel gone) makes fetch() return
+-- false, `stopped` stays nil, and the loop spun TLS handshakes every 0.6s
+-- forever, holding a wifi wake-lock and draining the battery on an abandoned
+-- session with no way to stop short of killing the process by hand.
+--
+-- fetch() is the health signal, not submit(): fetch() runs an unconditional
+-- GET every single cycle regardless of whether there is anything to upload,
+-- so it is a reliable per-cycle heartbeat. submit() returning false is
+-- ambiguous on its own -- most cycles have nothing new to send at all
+-- (`read(cfg.outbox_path) == nil`), which must never count as a failure or
+-- an idle, healthy session would back off and give up for no reason. Since
+-- submit() and fetch() share the same connect()/request() machinery (same
+-- host, same bearer token, same TLS pin), a broken session fails both
+-- identically, so driving the counter off fetch() alone still catches every
+-- realistic failure (revoked token, unreachable host, torn-down tunnel)
+-- without needing a second, redundant counter for submit().
+--
+-- Backoff: 1s, 2s, 4s, 8s, ..., capped at 120s, resetting to the healthy
+-- 0.6s cadence on the next successful fetch. Give up after 15 consecutive
+-- failures (~18 minutes of retrying at these intervals) -- long enough to
+-- ride out a brief wifi blip or the desktop app restarting, short enough
+-- that an abandoned or revoked session stops holding the wifi wake-lock
+-- within a bounded, human-scale time rather than indefinitely.
+local HEALTHY_SLEEP_SECONDS = 0.6
+local BACKOFF_BASE_SECONDS = 1
+local BACKOFF_CAP_SECONDS = 120
+local MAX_CONSECUTIVE_FAILURES = 15
+
+local consecutive_failures = 0
+
 while true do
     -- Sending first gives Kindle edits priority over any remote snapshot.
     submit()
-    local _, stopped = fetch()
+    local ok, stopped = fetch()
     -- MDEdit writes this only after its final autosave. A stopped desktop may
     -- deliberately reject that last upload, so retain one recovery copy rather
     -- than spinning forever on a closed session. Either way the worker exits:
@@ -123,5 +156,19 @@ while true do
         recover_and_cleanup()
         break
     end
-    socket.sleep(0.6)
+    if ok then
+        consecutive_failures = 0
+        socket.sleep(HEALTHY_SLEEP_SECONDS)
+    else
+        consecutive_failures = consecutive_failures + 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES then
+            -- Give up, but preserve any unsent edit exactly like a clean stop
+            -- -- the recovery-copy semantics must hold on every exit path,
+            -- not just the two the loop already handled.
+            recover_and_cleanup()
+            break
+        end
+        local backoff = math.min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2 ^ (consecutive_failures - 1)))
+        socket.sleep(backoff)
+    end
 end
