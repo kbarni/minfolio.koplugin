@@ -2,12 +2,11 @@
 -- The Minfolio app controller (PLAN.md §5 Tier 3, §10 step 5): owns the one
 -- live editor singleton and the two entry points a remote (desktop) session
 -- uses to start/stop editing, plus a small hook table the file/note browser
--- registers into at load time. `minfolio_browser` does not exist yet (a
--- later work package -- PLAN.md §5 Tier 5) -- until then, main.lua's still-
--- inline browser code (`edit_note`, `open_markdown_picker`,
--- `show_file_manager`) registers itself here as `M.hooks.open_note` /
--- `.open_picker` / `.file_manager`, and every other subsystem (the editor,
--- the plugin entry, and the remote-session entry points below) calls
+-- registers into at load time. `minfolio_browser` registers `edit_note`,
+-- `open_markdown_picker` and `show_file_manager` here as `M.hooks.open_note`
+-- / `.open_picker` / `.file_manager` when it loads, and every other
+-- subsystem (the editor, the plugin entry, and the remote-session entry
+-- points below) calls
 -- through `M.*` instead of reaching for those names directly.
 --
 -- This is the fix for the dependency tangle PLAN.md §4 documents:
@@ -71,7 +70,7 @@ function M.activeEditor()
 end
 
 -- Was edit_note's entry point; dispatches to whatever registered
--- M.hooks.open_note (main.lua's edit_note, until minfolio_browser exists).
+-- M.hooks.open_note (minfolio_browser's edit_note).
 function M.openNote(path, remote)
     if M.hooks.open_note then M.hooks.open_note(path, remote) end
 end

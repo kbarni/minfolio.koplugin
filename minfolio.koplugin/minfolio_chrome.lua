@@ -30,9 +30,9 @@
 --
 -- `rotate_screen_ccw` was one of main.lua's five forward-declared locals
 -- (`local open_markdown_picker, rotate_screen_ccw, show_file_manager`); its
--- body is moved verbatim here as `M.rotate_screen_ccw`, and the forward
--- declaration in main.lua now only names the other two (still unassigned
--- pending a later work package).
+-- body is moved verbatim here as `M.rotate_screen_ccw`. The other two moved
+-- to minfolio_browser, which forward-declares them itself, so main.lua no
+-- longer forward-declares anything at all.
 --
 -- notify's two forward-reference workaround call sites: main.lua's
 -- `MinfolioPair.showPrompt` (the "Desktop paired" / "Could not complete secure
