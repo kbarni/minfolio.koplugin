@@ -213,14 +213,20 @@ function M.showPrompt(msg, source)
     PairMsg.rememberNonce(M._nonce_cache, msg.nonce, now)
     M._prompt_open = true
 
-    -- The primary release path is the ConfirmBox's own callbacks (below).
-    -- This scheduled release is a last-resort safety valve in case some
-    -- dismiss path this code wasn't written against (KOReader's ConfirmBox
-    -- could not be inspected from this environment -- no KOReader install
-    -- here, see ARCHITECTURE.md) never invokes either callback: without it,
-    -- a single stuck dialog would disable pairing for the rest of the
-    -- session. 300s is long enough that it should never race a human still
-    -- reading a fresh, legitimate prompt.
+    -- Released from the widget's own teardown hook, plus a backstop.
+    --
+    -- Verified by reading KOReader's frontend/ui/widget/confirmbox.lua on the
+    -- device rather than assuming: cancel_callback fires on the Cancel button
+    -- (line 110), on onClose (242, the back/close event), and on onTapClose
+    -- (249, a tap outside, which routes through onClose). It does NOT fire on
+    -- onCloseWidget (236), which runs on *every* close including a programmatic
+    -- UIManager:close() from elsewhere. So onCloseWidget is the only hook that
+    -- covers every dismiss path, and it is what releases the gate below.
+    --
+    -- The scheduled release remains only for the one case onCloseWidget cannot
+    -- cover: UIManager:show() itself failing, so the widget is never shown and
+    -- never torn down. Without some backstop a single stuck flag would disable
+    -- pairing for the rest of the session.
     local function release()
         M._prompt_open = false
         if M._prompt_release_task then
@@ -231,7 +237,8 @@ function M.showPrompt(msg, source)
     M._prompt_release_task = release
     UIManager:scheduleIn(PairMsg.PROMPT_STUCK_TIMEOUT_SECONDS, release)
 
-    UIManager:show(ConfirmBox:new{ text = _("Pair with this desktop?\n\nVerification code: ") .. msg.code, ok_text = _("Pair"), ok_callback = function()
+    local box
+    box = ConfirmBox:new{ text = _("Pair with this desktop?\n\nVerification code: ") .. msg.code, ok_text = _("Pair"), ok_callback = function()
         release()
         local cfg = { host = msg.host, port = msg.port, cert_fingerprint = msg.fingerprint }
         local secret = M.secret()
@@ -248,7 +255,17 @@ function M.showPrompt(msg, source)
         else
             Chrome.notify(_("Could not complete secure pairing: ") .. tostring(err or "unknown error"))
         end
-    end, cancel_callback = release })
+    end, cancel_callback = release }
+    -- See the note above: onCloseWidget is the only hook that fires on every
+    -- close path, so the gate is released there regardless of how the dialog
+    -- went away. release() is idempotent, so the ok/cancel callbacks releasing
+    -- first is harmless.
+    local stock_on_close_widget = box.onCloseWidget
+    function box:onCloseWidget()
+        release()
+        if stock_on_close_widget then return stock_on_close_widget(self) end
+    end
+    UIManager:show(box)
 end
 
 function M.pollRequest()
