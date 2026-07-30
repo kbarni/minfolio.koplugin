@@ -434,7 +434,7 @@ becomes the executable statement of the Kindle subset.
 | 0 | **Inventory** (§6.1): 160-method assignment map, cross-boundary helpers, 5 forward decls, 6 globals, computed constants, nil-tolerant-guard list | reviewed before any extraction |
 | 1 | **Harden `deploy.sh`** (§8): glob parse check, single transfer, GGET gate, load assertion | deploy still works on current single-file plugin |
 | 2 | Extract Tier 0 (`minfolio_md` incl. `md_split_line_prefix`, `minfolio_text`, `minfolio_map_model`) + their tests. **Must precede step 3** — see below | tests green off-device |
-| 3 | Convert the 6 globals to module-locals; establish GGET allowlist baseline | parse + on-device load |
+| 3 | Convert the 6 globals to module-locals; establish GGET allowlist baseline. **Distributed, not standalone** — see below | parse + on-device load |
 | 4 | Extract Tier 1 (`config`, `io`, `state`, `style`, `const`, `keys` + relocated keyboard helpers, `frontlight`, `chrome` incl. `rotate_screen_ccw`) | parse + load + smoke |
 | 5 | Stand up `minfolio_app.lua`; convert all 5 forward decls and `active_mdedit` to it **in place**, still inside main.lua | smoke: open note, remote edit/stop, picker, rotate |
 | 6 | Extract Tier 2 (`remote` transport, `pair`); move `MinfolioRemote.edit`/`.stop` bodies into `App` | smoke: desktop pairing |
@@ -442,6 +442,20 @@ becomes the executable statement of the Kindle subset.
 | 8 | Editor: mixin loader, then `layout` → `tables` → `view`, **one at a time, deploying between each** | smoke after each |
 | 9 | Extract `minfolio_browser`; reduce `main.lua` to the entry | full smoke |
 | 10 | `ARCHITECTURE.md`, `PROTOCOL.md`, README, RELEASE_CHECKLIST | — |
+
+**The globals conversion is distributed across steps 3–6, not done in one pass.**
+Each of the six belongs to the module that will own it, so converting it *is* part
+of extracting that module: `MINFOLIO_REMOTE_DIR` and `MINFOLIO_PAIR_PATH` go to
+`minfolio_config` and `MinfolioBattery` to `minfolio_chrome` (step 4);
+`MinfolioPair` to `minfolio_pair` and `MinfolioRemote`'s transport half to
+`minfolio_remote` (step 6); `MinfolioRemote.edit`/`.stop` to `minfolio_app`
+(step 5). Only `rapidjson` is a standalone one-line change, and it is cheap to do
+with step 4. Doing them as a separate up-front pass would mean inventing temporary
+homes and then moving them again.
+
+As each global disappears, remove its name from `GGET_MINFOLIO` in
+`scripts/deploy.sh`, so the lint starts enforcing its absence instead of
+permitting it. The list should be empty by the end of step 6.
 
 **Why Tier 0 must precede the globals conversion.** Converting a global to a
 top-level local *adds* a local name, and the file is at exactly 200 of 200. So
