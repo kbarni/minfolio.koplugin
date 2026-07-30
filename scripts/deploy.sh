@@ -87,17 +87,13 @@ GGET_TESTS="print package"
 # so the lint starts enforcing their absence instead of permitting it.
 GGET_MINFOLIO="rapidjson MINFOLIO_REMOTE_DIR MINFOLIO_PAIR_PATH MinfolioPair MinfolioBattery MinfolioRemote"
 
-# Pre-existing bug, NOT a deliberate global -- flagged here, not fixed, since
-# this work package touches deploy.sh only. main.lua:170-171 call notify(...)
-# from inside a callback whose body is written BEFORE `local function
-# notify` at main.lua:925; that reference resolves to whatever global
-# `notify` is (nothing sets one, so it is nil) at the point it is lexically
-# written, regardless of when the callback actually runs. It will throw
-# "attempt to call a nil value" the first time a user confirms desktop
-# pairing (MinfolioPair.showPrompt's ok_callback). Keep allowlisting it here
-# until that forward reference is fixed, or every deploy fails on an
-# unrelated bug this work package was not scoped to touch.
-GGET_KNOWN_BUGS="notify"
+# Empty, and it should stay that way. This lint found one real bug on its
+# first run: main.lua:170-171 called notify() from a callback written before
+# `local function notify` at main.lua:925, so the reference compiled to a nil
+# global read and desktop pairing threw on its success path. Fixed by
+# inlining the Notification call at both sites. Add a name here only with a
+# written justification and a plan to remove it.
+GGET_KNOWN_BUGS=""
 
 GGET_ALLOWLIST="$GGET_STDLIB $GGET_TESTS $GGET_MINFOLIO $GGET_KNOWN_BUGS"
 

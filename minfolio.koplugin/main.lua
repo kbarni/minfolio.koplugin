@@ -167,8 +167,8 @@ function MinfolioPair.showPrompt(msg)
             lfs.mkdir(STATE_DIR)
             local state = io.open(MINFOLIO_PAIR_PATH, "w")
             if state then state:write(string.format("return { secret = %q }\n", secret)); state:close() end
-            notify(_("Desktop paired"))
-        else notify(_("Could not complete secure pairing")) end
+            UIManager:show(Notification:new{ text = _("Desktop paired"), timeout = 3 })
+        else UIManager:show(Notification:new{ text = _("Could not complete secure pairing"), timeout = 3 }) end
     end })
 end
 function MinfolioPair.pollRequest()
