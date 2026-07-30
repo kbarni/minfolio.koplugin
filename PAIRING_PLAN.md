@@ -46,6 +46,9 @@ bearing work it had not earned.
   one *session* may be live per Kindle. See §5.5 for the three chokepoints that make
   anything else a separate project.
 - No change to the merge semantics, which were verified lossless.
+- The pairing UI on both sides is **in scope and on the critical path** (WP 3 and WP 4).
+  v1 listed "not a UI redesign" as a non-goal; since pairing is unreachable without one,
+  that was not a scope boundary but a hole.
 - No defence against an adversary with physical or USB access to the Kindle, or with
   root SSH to it. Stated explicitly in §7 rather than left implied.
 
@@ -99,14 +102,27 @@ This also explains two things that had looked like oversights: the desktop only 
 delivered pair requests over SSH, and `discoverKindles()` was never wired to any UI.
 The SSH file drop was not an unfinished shortcut, it is the only channel that functions.
 
-**Consequence.** Every UDP-based step in this plan -- the offer broadcast in §4, the
-session-available nudge in §5.2, and the unpair datagram in §5.7 -- needs an `iptables`
-rule accepting UDP on 42771 on `wlan0`, installed at pairing time and made persistent
-across reboots, since Kindle firewall rules do not survive one. That is a firewall
-modification on the user's device and a real change to what "no configuration required"
-means. It must be decided before any of §4 is implemented, and it belongs in the
-onboarding story of §1 rather than being discovered by a user whose pairing silently
-never arrives.
+**Resolution: open the port only while pairing is armed.** KOReader runs as root on a
+jailbroken Kindle (dropbear exposes only root), so the plugin can manage the rule itself.
+Arming pairing installs `iptables -I INPUT -i wlan0 -p udp --dport 42771 -j ACCEPT`;
+disarming, or the window expiring, removes it with the matching `-D`.
+
+This is better than the persistent rule the first draft of this section assumed, on three
+counts. There is no reboot-persistence problem to solve, because the rule is created on
+demand rather than surviving anything. The port is reachable only inside a window the user
+deliberately opened, so the attack surface exists for 120 seconds rather than forever --
+which also shrinks the prompt-flooding exposure in §5 to the same window. And it needs no
+change to the user's system configuration, so "no configuration required" stays true.
+
+It composes with the arming design in §4 rather than sitting beside it: arming becomes
+"open the port, listen, show one prompt", and disarming becomes "close the port, stop
+listening". The rule must be removed on plugin teardown and on KOReader exit as well as on
+window expiry, or an interrupted pairing leaves the port open.
+
+Unverified: that `iptables` is present and callable from the KOReader process on this
+firmware. The device was asleep when this was written. Establish it before building §4, and
+fall back to Channel B (which works today) if the rule cannot be installed -- the UI must
+report which channel it used either way.
 
 v1 proposed broadcasting the nonce and code and having the user compare the code.
 Both reviewers destroyed it, correctly: that puts the shared secret on the wire, so
@@ -333,7 +349,7 @@ Ordering per the reviews, which found v1's graph wrong in three places.
 
 | Risk | Mitigation |
 |---|---|
-| **Inbound UDP dropped by the Kindle firewall** | §4.0. Requires a persistent iptables rule; until then no UDP step in this plan can work |
+| **Inbound UDP dropped by the Kindle firewall** | §4.0: the plugin opens the port only while pairing is armed and closes it after, so no persistent rule and no reboot problem. Must be removed on teardown and KOReader exit too, or an interrupted pairing leaves it open. Falls back to Channel B if `iptables` proves uncallable |
 | Broadcast blocked | manual address entry, plus SSH as an explicit user action (§4) |
 | Blind-accept of a mismatched prompt | arming plus the fingerprint prefix on both screens; irreducible beyond that |
 | `/var/local` does not survive a firmware update | test before committing; fall back to `/mnt/us` with the exclusion documented |
@@ -347,7 +363,8 @@ Ordering per the reviews, which found v1's graph wrong in three places.
 1. A desktop with no SSH access, no key, and no config file can pair with a Kindle:
    the user arms pairing on the Kindle, both screens show the same fingerprint
    prefix, the user types the Kindle's code into the desktop, and pairing completes.
-2. The Kindle accepts inbound UDP on 42771, and the rule survives a reboot.
+2. The Kindle accepts inbound UDP on 42771 only while pairing is armed, and the rule is
+   gone after the window closes, after disarming, and after KOReader exits.
 2. Outside the armed window, a `minfolio-pair-offer` produces no prompt at all.
 3. A spoofed offer carrying an attacker's host, port and fingerprint cannot cause the
    Kindle to send its secret anywhere, because the Kindle connects only to a stored
