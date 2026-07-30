@@ -80,23 +80,19 @@ GGET_STDLIB="_G arg assert debug dofile io ipairs math os pairs pcall require se
 # Without these the first test file added would fail the lint, not the tests.
 GGET_TESTS="print package"
 
-# The deliberate Minfolio globals (PLAN.md section 6.4), forced into existence
-# only by the 200-local ceiling this refactor exists to remove. Each leaves this
-# list as the module that owns it is extracted, so the lint enforces its absence
-# from then on rather than permitting it. Delete the line once it is empty.
+# All six deliberate Minfolio globals (PLAN.md section 6.4) are gone -- each was
+# a global only because of the 200-local ceiling this refactor removed. They now
+# belong to minfolio_config (rapidjson, MINFOLIO_REMOTE_DIR, MINFOLIO_PAIR_PATH),
+# minfolio_chrome (MinfolioBattery), minfolio_pair and minfolio_remote. This list
+# is deliberately EMPTY: any Minfolio-looking global read is now a lint failure.
 #
-# A cautionary note on this list: while MinfolioBattery sat here, minfolio_chrome
-# took ownership of it as M.MinfolioBattery and stopped assigning the global, but
-# five call sites in main.lua still read it bare. The lint stayed green because
-# the name was allowlisted, so it masked five guaranteed nil-index errors on the
-# battery indicator. Allowlisting a name disables the only check that would have
-# caught that. Remove each name the moment its owner is extracted.
-#
-# Gone: rapidjson, MINFOLIO_REMOTE_DIR, MINFOLIO_PAIR_PATH (minfolio_config),
-#       MinfolioBattery (minfolio_chrome).
-# Remaining: MinfolioPair -> minfolio_pair, MinfolioRemote -> minfolio_remote
-#            and minfolio_app (steps 5-6).
-GGET_MINFOLIO="MinfolioPair MinfolioRemote"
+# Do not add a name back here without a written justification. While
+# MinfolioBattery sat in this list, minfolio_chrome took ownership of it and
+# stopped assigning the global, yet five call sites still read it bare -- the
+# lint stayed green and masked five guaranteed nil-index errors on the battery
+# indicator. Allowlisting a name disables the only check that catches exactly
+# that, which is why the list is empty rather than merely short.
+GGET_MINFOLIO=""
 
 # Empty, and it should stay that way. This lint found one real bug on its
 # first run: main.lua:170-171 called notify() from a callback written before

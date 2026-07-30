@@ -31,8 +31,6 @@ local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Notification = require("ui/widget/notification")
 local lfs = require("libs/libkoreader-lfs")
-local socket = require("socket")
-local rapidjson = require("rapidjson")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = Device.screen
@@ -51,88 +49,12 @@ local Frontlight = require("minfolio_frontlight")
 -- FL.xxx call site keeps working untouched.
 local FL = Frontlight.FL
 local Chrome = require("minfolio_chrome")
-
-MinfolioPair = { port = 42771 }
-function MinfolioPair.deviceId()
-    local f = io.open("/proc/usid", "r")
-    local id = f and f:read("*l") or nil
-    if f then f:close() end
-    return (id and id:gsub("[^%w]", "")) or "kindle"
-end
-function MinfolioPair.secret()
-    local f = io.open("/dev/urandom", "rb")
-    local raw = f and f:read(24) or tostring(os.time()) .. tostring(socket.gettime())
-    if f then f:close() end
-    return (raw:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
-end
-function MinfolioPair.post(cfg, path, body)
-    local sock = MinfolioRemote and MinfolioRemote.socket(cfg, 2)
-    if not sock then return false end
-    local raw = rapidjson.encode(body)
-    local req = "POST " .. path .. " HTTP/1.1\r\nHost: " .. cfg.host .. "\r\nContent-Type: application/json\r\nContent-Length: " .. #raw .. "\r\nConnection: close\r\n\r\n" .. raw
-    MinfolioRemote.sendAll(sock, req); pcall(function() sock:close() end)
-    return true
-end
-function MinfolioPair.showPrompt(msg)
-    if not (msg and msg.code and msg.host and msg.port and msg.fingerprint and msg.nonce) then return end
-    UIManager:show(ConfirmBox:new{ text = _("Pair with this desktop?\n\nVerification code: ") .. tostring(msg.code), ok_text = _("Pair"), ok_callback = function()
-        local cfg = { host = msg.host, port = tonumber(msg.port), cert_fingerprint = msg.fingerprint }
-        local secret = MinfolioPair.secret()
-        if MinfolioPair.post(cfg, "/kindle/pair", { nonce = msg.nonce, code = msg.code, deviceId = MinfolioPair.deviceId(), secret = secret }) then
-            lfs.mkdir(Config.STATE_DIR)
-            local state = io.open(Config.MINFOLIO_PAIR_PATH, "w")
-            if state then state:write(string.format("return { secret = %q }\n", secret)); state:close() end
-            Chrome.notify(_("Desktop paired"))
-        else Chrome.notify(_("Could not complete secure pairing")) end
-    end })
-end
-function MinfolioPair.pollRequest()
-    local flag = "/tmp/minfolio_pair_request"
-    local fp = io.open(flag, "r")
-    if not fp then return end
-    fp:close()
-    os.remove(flag)
-    local ok, msg = pcall(dofile, Config.MINFOLIO_REMOTE_DIR .. "/pair-request.lua")
-    if ok then MinfolioPair.showPrompt(msg) end
-end
-function MinfolioPair.poll()
-    if not MinfolioPair.sock then return end
-    -- UDP is untrusted input.  Draining an endless datagram queue in a single
-    -- UI callback can starve taps, rendering, and suspend handling.
-    local processed, max_per_tick = 0, 32
-    while processed < max_per_tick do
-        local raw, ip, reply_port = MinfolioPair.sock:receivefrom()
-        if not raw then break end
-        processed = processed + 1
-        local ok, msg = pcall(function() return rapidjson.decode(raw) end)
-        if ok and msg.type == "minfolio-discover" and msg.nonce then
-            local reply = rapidjson.encode({ type = "minfolio-device", nonce = msg.nonce, id = MinfolioPair.deviceId(), label = "Kindle Minfolio" })
-            MinfolioPair.sock:sendto(reply, ip, reply_port)
-        elseif ok and msg.type == "minfolio-pair-request" then
-            MinfolioPair.showPrompt(msg)
-        end
-    end
-    if processed == max_per_tick then
-        local now = IO.now_seconds()
-        if not MinfolioPair._last_backpressure_log or now - MinfolioPair._last_backpressure_log >= 30 then
-            MinfolioPair._last_backpressure_log = now
-            logger.warn("minfolio discovery queue capped; deferring remaining UDP datagrams")
-        end
-    end
-end
-function MinfolioPair.beacon()
-    if not MinfolioPair.sock then return end
-    local msg = rapidjson.encode({ type = "minfolio-device", id = MinfolioPair.deviceId(), label = "Kindle Minfolio" })
-    pcall(function() MinfolioPair.sock:sendto(msg, "255.255.255.255", MinfolioPair.port) end)
-end
-function MinfolioPair.start()
-    if MinfolioPair.sock then return end
-    local s = socket.udp(); if not s then return end
-    s:setsockname("*", MinfolioPair.port); s:setoption("broadcast", true); s:settimeout(0); MinfolioPair.sock = s
-    Chrome.trace("discovery-start", "port=", MinfolioPair.port)
-    local function tick() MinfolioPair.poll(); MinfolioPair.pollRequest(); MinfolioPair.beacon(); UIManager:scheduleIn(0.75, tick) end
-    UIManager:scheduleIn(0.25, tick)
-end
+local App = require("minfolio_app")
+-- Desktop discovery/pairing (PLAN.md §5 Tier 2); moved out of this file
+-- along with the transport it depends on (minfolio_remote, below it in the
+-- require graph, not read directly here -- only Minfolio:init's
+-- Pair.start() call site remains in this file).
+local Pair = require("minfolio_pair")
 
 -- ============================ Live styled markdown editor (Phase 1) ============================
 local md_clipboard = ""               -- shared across notes
@@ -142,8 +64,8 @@ local open_markdown_picker, show_file_manager   -- fwd decls
 -- stack a second MDEdit on the same file: both keep polling the file and each
 -- one's autosave looks like an external change to the other, producing a
 -- "Reloaded from disk" storm and a half-repainted screen. edit_note() enforces
--- the singleton; MDEdit clears it on close.
-local active_mdedit
+-- the singleton (via App.setActive/.activeEditor, PLAN.md §5 Tier 3); MDEdit
+-- clears it on close (via App.clearActive).
 
 -- ============================ Native Markdown mindmap ============================
 -- Tree parsing/model moved to minfolio_map_model.lua (PLAN.md §5 Tier 0); this file now only
@@ -1046,43 +968,11 @@ function MindmapView:onScreenResize()
     return true
 end
 
--- A remote session is deliberately dormant until the desktop explicitly writes
--- a descriptor and launches `remote:`. There is no discovery loop or background
--- connection merely because Minfolio is open.
-MinfolioRemote = {}
-function MinfolioRemote.socket(cfg, timeout)
-    local sock, err = socket.tcp()
-    if not sock then return nil, err end
-    sock:settimeout(timeout or 1)
-    local ok, cerr = sock:connect(cfg.host, cfg.port)
-    if not ok then pcall(function() sock:close() end); return nil, cerr end
-    local ok_ssl, ssl = pcall(require, "ssl")
-    if not ok_ssl then pcall(function() sock:close() end); return nil, "LuaSec missing" end
-    local wrapped, werr = ssl.wrap(sock, { mode = "client", protocol = "any", verify = "none", options = "all" })
-    if not wrapped then pcall(function() sock:close() end); return nil, werr end
-    wrapped:settimeout(timeout or 1)
-    while true do
-        local hs_ok, hs_err = wrapped:dohandshake()
-        if hs_ok then break end
-        if hs_err ~= "wantread" and hs_err ~= "wantwrite" then pcall(function() wrapped:close() end); return nil, hs_err end
-    end
-    local cert = wrapped:getpeercertificate()
-    local fpr = cert and cert:digest("sha256"):lower():gsub(":", "") or nil
-    if not fpr or fpr ~= tostring(cfg.cert_fingerprint or ""):lower():gsub(":", "") then
-        pcall(function() wrapped:close() end); return nil, "desktop certificate pin mismatch"
-    end
-    return wrapped
-end
-
-function MinfolioRemote.sendAll(sock, data)
-    local pos = 1
-    while pos <= #data do
-        local sent, err = sock:send(data, pos)
-        if not sent then return false, err end
-        pos = sent + 1
-    end
-    return true
-end
+-- Transport for a remote (desktop) editing session moved to minfolio_remote.lua
+-- (PLAN.md §5 Tier 2, §10 step 6); session control (what used to be
+-- MinfolioRemote.edit/.stop) moved to minfolio_app.lua in the prior step.
+-- Nothing in this file calls the transport directly -- only minfolio_pair.lua
+-- (Pair.post, above) does.
 
 local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true }
 function MDEdit:init()
@@ -3536,7 +3426,7 @@ function MDEdit:saveAndOpenMarkdown()
     self.keyboard = nil
     if keyboard then UIManager:close(keyboard) end
     UIManager:close(self)
-    if open_markdown_picker then open_markdown_picker(Config.path_parent(self.path)) end
+    App.openPicker(Config.path_parent(self.path))
 end
 function MDEdit:onCloseWidget()
     Chrome.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
@@ -3554,7 +3444,7 @@ function MDEdit:onCloseWidget()
         -- leave the new worker/editor with no descriptor. The per-session
         -- `closing` marker is the only state this editor owns.
     end
-    if active_mdedit == self then active_mdedit = nil end
+    App.clearActive(self)
     self._caret_blinking = false
     if self._caret_blink_pending then
         UIManager:unschedule(self._caret_blink_pending)
@@ -4244,81 +4134,45 @@ end
 local function edit_note(path, remote)
     Chrome.trace("edit-request", "path=", tostring(path), "remote=", remote and "yes" or "no")
     Frontlight.fl_restore_if_needed()
-    if active_mdedit and not active_mdedit._closing then
+    local active = App.activeEditor()
+    if active and not active._closing then
         -- Already editing this exact file: keep the live editor (with its cursor
         -- and unsaved edits) instead of stacking a duplicate that would fight it.
-        if active_mdedit.path == path then return end
+        if active.path == path then return end
         -- Switching files: flush and close the current editor first so only one
         -- editor (and one file poller) is ever live. Suppress its on_close so we
         -- don't bounce through the listing on the way to the next note.
-        active_mdedit.on_close = nil
-        active_mdedit:saveAndClose()
+        active.on_close = nil
+        active:saveAndClose()
     end
     -- Closing the document always returns to the Minfolio file listing at the
     -- note's folder -- even when the note was opened by a send from the computer
     -- (launch flag), which otherwise would drop back to KOReader.
     local ed = MDEdit:new{ path = path, remote = remote, on_close = function()
-        if show_file_manager then show_file_manager(Config.path_parent(path)) end
+        App.openFileManager(Config.path_parent(path))
     end }
-    active_mdedit = ed
+    App.setActive(ed)
     UIManager:show(ed, "full")   -- "full" forces a complete repaint over the menu
     Chrome.trace("editor-shown", "path=", tostring(path))
     -- Closing the file browser and showing the editor each queue their own dirty
     -- updates.  Reassert the editor after that transition has drained so a
     -- browser-region update cannot win and leave a partially blank launch view.
     UIManager:scheduleIn(0.12, function()
-        if active_mdedit == ed and not ed._closing then
+        if App.activeEditor() == ed and not ed._closing then
             UIManager:setDirty(ed, "full")
         end
     end)
 end
-
-function MinfolioRemote.edit(descriptor_path)
-    local ok, cfg = pcall(dofile, descriptor_path)
-    if not ok or type(cfg) ~= "table" or type(cfg.host) ~= "string" or type(cfg.port) ~= "number" then
-        Chrome.notify(_("Invalid secure desktop editing session")); return
-    end
-    if type(cfg.session_id) ~= "string" or not cfg.session_id:match("^[A-Za-z0-9_-]+$")
-        or type(cfg.token) ~= "string" or type(cfg.cert_fingerprint) ~= "string" then
-        Chrome.notify(_("Invalid secure desktop editing session")); return
-    end
-    lfs.mkdir(Config.STATE_DIR)
-    local expected_directory = Config.MINFOLIO_REMOTE_DIR .. "/" .. cfg.session_id
-    if cfg.directory ~= expected_directory then Chrome.notify(_("Invalid secure desktop editing session")); return end
-    lfs.mkdir(Config.MINFOLIO_REMOTE_DIR); lfs.mkdir(cfg.directory)
-    local shadow = cfg.directory .. "/document.md"
-    cfg.outbox_path = cfg.directory .. "/outbox.md"
-    cfg.inbox_path = cfg.directory .. "/inbox.md"
-    cfg.revision_path = cfg.directory .. "/revision"
-    cfg.closing_path = cfg.directory .. "/closing"
-    -- The initial content arrives over the existing encrypted SSH launch command.
-    -- It is written before MDEdit is constructed, so the editor never opens blank.
-    if not IO.read_file(shadow) then IO.write_file(shadow, type(cfg.content) == "string" and cfg.content or "") end
-    edit_note(shadow, cfg)
-end
-
-function MinfolioRemote.stop(session_id)
-    if active_mdedit and active_mdedit.remote and active_mdedit.remote.session_id == session_id then
-        active_mdedit:saveAndClose()
-    end
-end
+-- minfolio_browser does not exist yet (PLAN.md §5 Tier 5, a later work
+-- package); until then this registers the still-inline browser's entry point
+-- so every other subsystem reaches it via App.openNote(...) instead of
+-- calling edit_note directly (App.remoteEdit, in minfolio_app.lua, and
+-- Minfolio:openLaunchTarget's `edit:` handler below both do).
+App.hooks.open_note = edit_note
 
 -- Rotates the whole device screen 90° counter-clockwise (repeat to cycle through
 -- upright / sideways / upside-down / sideways-the-other-way, same 4 modes KOReader
 -- itself uses for its own rotation).
-Chrome.rotate_screen_ccw = function()
-    local mode = Screen:getRotationMode()
-    Screen:setRotationMode((mode - 1) % 4)
-    -- Every full-screen widget we show (the file listing, the editor, any
-    -- popout) is sized from Screen:getWidth()/getHeight() at construction
-    -- time, so it goes stale the instant the physical rotation flips those --
-    -- reads as a frozen/undersized screen. Broadcasting ScreenResize reaches
-    -- every widget in the stack (including ones sitting hidden underneath
-    -- another, e.g. the file list behind an open note), not just the one on
-    -- top, so nothing is left showing a layout built for the old dimensions.
-    UIManager:broadcastEvent(require("ui/event"):new("ScreenResize"))
-end
-
 local function clean_entry_name(name, add_md_ext)
     name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if name == "" or name == "." or name == ".." or name:find("/", 1, true) or name:find("%z") then
@@ -4408,6 +4262,10 @@ open_markdown_picker = function(start_dir)
     }
     UIManager:show(menu)
 end
+-- minfolio_browser does not exist yet (PLAN.md §5 Tier 5); registered so
+-- MDEdit:saveAndOpenMarkdown (a different future module) can reach this via
+-- App.openPicker(...) instead of calling the forward-declared local directly.
+App.hooks.open_picker = open_markdown_picker
 
 local function refresh_file_manager(menu, dir)
     -- Folder navigation replaces the current Menu's item table. Keeping one
@@ -4702,6 +4560,10 @@ show_file_manager = function(start_dir)
     end
     UIManager:show(menu)
 end
+-- minfolio_browser does not exist yet (PLAN.md §5 Tier 5); registered so
+-- edit_note's on_close (above) reaches this via App.openFileManager(...)
+-- instead of a nil-tolerant guard on the forward-declared local.
+App.hooks.file_manager = show_file_manager
 
 local function open_notes()
     show_file_manager(Config.NOTES_DIR)
@@ -4725,13 +4587,13 @@ function Minfolio:openLaunchTarget(target)
         UIManager:scheduleIn(0.1, open_notes)
     elseif target:match("^edit:") then                  -- open a specific file in the editor
         local path = target:sub(6)
-        UIManager:scheduleIn(0.1, function() edit_note(path) end)
+        UIManager:scheduleIn(0.1, function() App.openNote(path) end)
     elseif target:match("^remote:") then
         local descriptor = target:sub(8)
-        UIManager:scheduleIn(0.1, function() MinfolioRemote.edit(descriptor) end)
+        UIManager:scheduleIn(0.1, function() App.remoteEdit(descriptor) end)
     elseif target:match("^remote%-stop:") then
         local session_id = target:sub(13)
-        UIManager:scheduleIn(0.1, function() MinfolioRemote.stop(session_id) end)
+        UIManager:scheduleIn(0.1, function() App.remoteStop(session_id) end)
     end
 end
 
@@ -4764,7 +4626,7 @@ end
 function Minfolio:init()
     Chrome.trace("plugin-init", "notes_dir=", Config.NOTES_DIR)
     Keys.install_keyboard_aliases()
-    MinfolioPair.start()
+    Pair.start()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     if not _G.__minfolio_launch_polling then
