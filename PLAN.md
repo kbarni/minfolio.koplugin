@@ -433,8 +433,8 @@ becomes the executable statement of the Kindle subset.
 |---|---|---|
 | 0 | **Inventory** (§6.1): 160-method assignment map, cross-boundary helpers, 5 forward decls, 6 globals, computed constants, nil-tolerant-guard list | reviewed before any extraction |
 | 1 | **Harden `deploy.sh`** (§8): glob parse check, single transfer, GGET gate, load assertion | deploy still works on current single-file plugin |
-| 2 | Convert the 6 globals to module-locals in place; establish GGET allowlist baseline | parse + on-device load |
-| 3 | Extract Tier 0 (`minfolio_md` incl. `md_split_line_prefix`, `minfolio_text`, `minfolio_map_model`) + their tests | tests green off-device |
+| 2 | Extract Tier 0 (`minfolio_md` incl. `md_split_line_prefix`, `minfolio_text`, `minfolio_map_model`) + their tests. **Must precede step 3** — see below | tests green off-device |
+| 3 | Convert the 6 globals to module-locals; establish GGET allowlist baseline | parse + on-device load |
 | 4 | Extract Tier 1 (`config`, `io`, `state`, `style`, `const`, `keys` + relocated keyboard helpers, `frontlight`, `chrome` incl. `rotate_screen_ccw`) | parse + load + smoke |
 | 5 | Stand up `minfolio_app.lua`; convert all 5 forward decls and `active_mdedit` to it **in place**, still inside main.lua | smoke: open note, remote edit/stop, picker, rotate |
 | 6 | Extract Tier 2 (`remote` transport, `pair`); move `MinfolioRemote.edit`/`.stop` bodies into `App` | smoke: desktop pairing |
@@ -442,6 +442,19 @@ becomes the executable statement of the Kindle subset.
 | 8 | Editor: mixin loader, then `layout` → `tables` → `view`, **one at a time, deploying between each** | smoke after each |
 | 9 | Extract `minfolio_browser`; reduce `main.lua` to the entry | full smoke |
 | 10 | `ARCHITECTURE.md`, `PROTOCOL.md`, README, RELEASE_CHECKLIST | — |
+
+**Why Tier 0 must precede the globals conversion.** Converting a global to a
+top-level local *adds* a local name, and the file is at exactly 200 of 200. So
+converting the six globals first needs 206 slots and cannot compile — verified: even
+one added local fails today. Tier 0 is the only step that is net-negative on the
+budget: it removes 21 top-level locals (8 markdown, 11 text/path, 2 map-model) and
+adds 3 `require` locals, netting −18 to about 182 names. That headroom is what makes
+every later step possible. Any step that adds a local before Tier 0 lands will fail
+to compile, and KOReader will silently drop the plugin.
+
+For the same reason the *first* extraction cannot be a module that only moves table
+fields out. Moving `MinfolioPair` alone, for instance, frees no locals — its methods
+are table fields — while adding one `require` local, so it is net +1 and fails.
 
 Changes from v1's order, per review: inventory added as step 0; tooling moved from
 last to step 1; globals conversion added; the controller seam (step 5) now precedes
