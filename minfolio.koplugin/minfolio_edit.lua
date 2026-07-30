@@ -46,12 +46,16 @@ local FL = Frontlight.FL
 local Chrome = require("minfolio_chrome")
 local App = require("minfolio_app")
 local MindmapView = require("minfolio_map_view")
--- Layout is the only mixin module needing a top-level local here: its
--- fns.freeWrapEntry is called from three sites below (onScreenResize,
--- onCloseWidget, bumpScale). minfolio_edit_tables/minfolio_edit_view expose
--- no plain fns, so the assembly loop below requires them directly inline
--- (matching PLAN.md §6.2's own example) with no standalone local needed.
-local Layout = require("minfolio_edit_layout")
+-- free_wrap_entry lives in minfolio_edit_layout's `fns` channel rather than
+-- its `methods` table, because it is a plain helper and not an MDEdit method.
+-- Bind the function itself, not the module: it is called bare from three sites
+-- below (onScreenResize, onCloseWidget, bumpScale), and binding it keeps those
+-- call sites byte-identical to the pre-split code. Reaching it as
+-- `Layout.freeWrapEntry` is the mistake to avoid -- that path is nil, since the
+-- function sits under `fns`, and it throws only when one of those three paths
+-- actually runs. minfolio_edit_tables/minfolio_edit_view expose no plain fns,
+-- so the assembly loop below requires them inline.
+local free_wrap_entry = require("minfolio_edit_layout").fns.freeWrapEntry
 
 local md_clipboard = ""               -- shared across notes
 local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true }
@@ -1045,7 +1049,7 @@ function MDEdit:onScreenResize()
     end
     self._wcache, self._hcache = {}, {}
     if self._wrap_cache then
-        for _, entry in pairs(self._wrap_cache) do Layout.freeWrapEntry(entry) end
+        for _, entry in pairs(self._wrap_cache) do free_wrap_entry(entry) end
     end
     self._wrap_cache = nil
     self:refresh{ layout_dirty = true, full = true }
@@ -1156,7 +1160,7 @@ function MDEdit:onCloseWidget()
     -- currently on screen (UIManager's own close-time free only reaches the
     -- visible tree); off-screen rows are only reachable through this cache.
     if self._wrap_cache then
-        for _, entry in pairs(self._wrap_cache) do Layout.freeWrapEntry(entry) end
+        for _, entry in pairs(self._wrap_cache) do free_wrap_entry(entry) end
         self._wrap_cache = nil
     end
 end
@@ -1282,7 +1286,7 @@ function MDEdit:bumpScale(d)
     State.save_minfolio_state()
     self._wcache = {}; self._hcache = {}
     if self._wrap_cache then
-        for _, entry in pairs(self._wrap_cache) do Layout.freeWrapEntry(entry) end
+        for _, entry in pairs(self._wrap_cache) do free_wrap_entry(entry) end
     end
     self._wrap_cache = nil          -- scale changes wrapping/heights; drop the per-line cache
     self:refresh()

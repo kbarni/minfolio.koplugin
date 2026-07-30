@@ -46,12 +46,16 @@ Install the KOReader plugin:
 
 ```sh
 mkdir -p /mnt/us/koreader/plugins/minfolio.koplugin
-cp minfolio.koplugin/main.lua /mnt/us/koreader/plugins/minfolio.koplugin/
-cp minfolio.koplugin/_meta.lua /mnt/us/koreader/plugins/minfolio.koplugin/
-cp minfolio.koplugin/minfolio_sync.lua /mnt/us/koreader/plugins/minfolio.koplugin/
-cp minfolio.koplugin/minfolio_sync.sh /mnt/us/koreader/plugins/minfolio.koplugin/
+cp minfolio.koplugin/*.lua minfolio.koplugin/minfolio_sync.sh /mnt/us/koreader/plugins/minfolio.koplugin/
 chmod 755 /mnt/us/koreader/plugins/minfolio.koplugin/minfolio_sync.sh
 ```
+
+The plugin is now split across more than 20 files (see [Project layout](#project-layout)
+below), so this is a directory copy, not a handful of named files — copying the three
+`*_test.lua` files and `config.example.lua` along with it is harmless, they are development-only
+and nothing on the device loads them. `scripts/deploy.sh` (see [Development](#development))
+does the same copy over SSH with additional safety checks and is the recommended path if
+you have SSH access to the Kindle instead of a mounted filesystem.
 
 Install the KUAL launcher as `/mnt/us/extensions/minfolio`:
 
@@ -90,30 +94,38 @@ KOReader UI loop.
 
 ## Project layout
 
+`minfolio.koplugin/` is a flat directory of over 20 `minfolio_*`-prefixed Lua modules plus a
+slim `main.lua` entry point, organised in tiers with dependencies pointing downward only:
+pure Markdown/text/mindmap-model parsing with no KOReader dependency and its own off-device
+tests; KOReader adapters (config, I/O, state, style, constants, keyboard, frontlight, screen
+chrome); the desktop transport and pairing handshake; a small controller that owns the live
+editor singleton and the desktop remote-session entry points; the `MDEdit` editor itself,
+assembled at load time from four files; and the mindmap view, the notes browser, and
+`main.lua` on top. `minfolio_sync.lua`/`minfolio_sync.sh` is a separate, isolated,
+pinned-TLS worker process used only during an active desktop editing session — never loaded
+by KOReader. **See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full module map, the real
+dependency graph, and the mechanisms (the mixin assembly, the app controller, the
+local-variable-limit history) a contributor needs before changing any of it.**
+[`PROTOCOL.md`](PROTOCOL.md) specifies the desktop pairing and document-sync wire protocol
+in full.
+
 | Path | Role |
 |---|---|
-| `minfolio.koplugin/main.lua` | The plugin: `MDEdit` editor, native mindmap view, Markdown renderer, notes browser, plugin entry. |
-| `minfolio.koplugin/_meta.lua` | Plugin metadata. |
-| `minfolio.koplugin/config.example.lua` | Optional local config template. |
-| `minfolio.koplugin/minfolio_sync.*` | Isolated, pinned-TLS worker used only during an active desktop editing session. |
+| `minfolio.koplugin/` | The plugin. See `ARCHITECTURE.md`. |
 | `minfolio-kual/` | KUAL launcher: `config.xml`, `menu.json`, `bin/notes.sh`. |
-| `scripts/deploy.sh` | Developer helper: copy the plugin to a Kindle over SSH and parse-check it there. |
+| `scripts/deploy.sh` | Developer helper: parse-check, lint, test, and deploy the plugin to a Kindle over SSH. |
 
 ## Development
 
-`scripts/deploy.sh [ssh-host]` copies the plugin and isolated sync worker to the device, then
-parse-checks both with the device's own LuaJIT. The argument is an ssh(1) host, so a plain
-`Host kindle` block in `~/.ssh/config` is all the setup required (it defaults to `kindle`). Restart
-KOReader manually when you are ready.
-
-A Lua syntax error makes KOReader silently skip the whole plugin, so always parse-check before trusting
-a deploy:
-
-```sh
-luajit -e 'for _,p in ipairs({"minfolio.koplugin/main.lua", "minfolio.koplugin/minfolio_sync.lua"}) do local f,e=loadfile(p); if not f then print(e); os.exit(1) end end; print("PARSE OK")'
-jq empty minfolio-kual/menu.json
-sh -n scripts/deploy.sh minfolio-kual/bin/notes.sh minfolio.koplugin/minfolio_sync.sh
-```
+A Lua syntax error makes KOReader silently skip the whole plugin, so `scripts/deploy.sh
+[ssh-host]` runs a full local gate before it ever touches the device: parse-check every
+`minfolio.koplugin/*.lua` by glob, a lint for global reads that a moved/renamed symbol can
+leave behind (see `ARCHITECTURE.md`), and the off-device test suite. Only then does it
+transfer the plugin as one atomic operation, parse-check it again on the device, and attempt
+a restart with a load confirmation. The argument is an ssh(1) host, so a plain `Host kindle`
+block in `~/.ssh/config` is all the setup required (it defaults to `kindle`). See
+`RELEASE_CHECKLIST.md` for the pre-release checklist and `ARCHITECTURE.md`/`PROTOCOL.md` for
+the module map and the desktop wire protocol.
 
 ## Sister app
 
