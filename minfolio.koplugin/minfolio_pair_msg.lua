@@ -92,9 +92,27 @@ M.PROMPT_STUCK_TIMEOUT_SECONDS = 300
 -- cannot break this version by sending a type it doesn't understand.
 -- ---------------------------------------------------------------------------
 
+-- `minfolio-pair-offer` (PAIRING_PLAN.md §4, WP 2/3 ceremony redesign): v1's
+-- ceremony had the DESKTOP generate the pairing code and broadcast it inside
+-- the pair-request datagram for the human to merely compare against the
+-- desktop's own screen. Both reviewers rejected that (PAIRING_PLAN.md §4:
+-- "puts the shared secret on the wire, so a LAN observer could POST ... with
+-- a secret of their own"). The redesign inverts it: the KINDLE generates the
+-- code (minfolio_pair.lua's M.generateCode) and the human types it into the
+-- desktop, so it never appears on the wire in either direction. That means
+-- the offer datagram no longer needs to carry a code or a nonce at all --
+-- only enough to identify and label the desktop making the offer:
+-- `{ v, host, port, fingerprint, label }`, validated below by
+-- `M.validatePairOffer`. It is added as a NEW known type alongside
+-- `minfolio-pair-request` rather than replacing it -- see
+-- minfolio_pair.lua's own header comment for why both shapes are still
+-- handled, and minfolio_pair_msg_test.lua's history for why the "not yet
+-- invented" placeholder type in the isKnownType tests below had to move to a
+-- different string once this one became real.
 local KNOWN_TYPES = {
     ["minfolio-discover"] = true,
     ["minfolio-pair-request"] = true,
+    ["minfolio-pair-offer"] = true,
 }
 
 function M.isKnownType(t)
@@ -127,10 +145,47 @@ local NONCE_PATTERN = "^[%w%-_%.%+/=]+$"
 -- IPv4, IPv6 (colons), or a DNS hostname -- never shell/path/quote metachars.
 local HOST_PATTERN = "^[%w%.%-:]+$"
 
+-- A desktop-supplied display name (PAIRING_PLAN.md §5.8's "Add a label field
+-- in both directions"). Bounded, and rejects control characters (Lua's `%c`
+-- class -- 0x00-0x1F and 0x7F) so a malicious label can't smuggle a newline
+-- into the Kindle's ConfirmBox text and forge extra lines, but otherwise
+-- permissive: ordinary printable UTF-8 (accented names, emoji, non-Latin
+-- scripts) is made of bytes >= 0x80, none of which are control characters,
+-- so it passes through untouched.
+M.MAX_LABEL_LEN = 64
+
+-- ---------------------------------------------------------------------------
+-- Shared field validators, used by both validatePairRequest (Channel A/B's
+-- original five-field shape) and validatePairOffer (the newer, code-less
+-- offer shape, see the KNOWN_TYPES comment above) -- host/port/fingerprint
+-- mean exactly the same thing and are checked exactly the same way in both,
+-- so the checks live once here rather than being duplicated per validator.
+-- ---------------------------------------------------------------------------
+
+local function valid_host(host)
+    return type(host) == "string" and #host > 0 and #host <= M.MAX_HOST_LEN
+        and host:match(HOST_PATTERN) ~= nil
+end
+
+local function valid_port(port)
+    return type(port) == "number" and port == math.floor(port)
+        and port >= M.MIN_PORT and port <= M.MAX_PORT
+end
+
+local function valid_fingerprint(fingerprint)
+    return type(fingerprint) == "string" and #fingerprint == M.FINGERPRINT_HEX_LEN
+        and fingerprint:match(FINGERPRINT_PATTERN) ~= nil
+end
+
 function M.validNonceFormat(nonce)
     return type(nonce) == "string"
         and #nonce >= M.NONCE_MIN_LEN and #nonce <= M.NONCE_MAX_LEN
         and nonce:match(NONCE_PATTERN) ~= nil
+end
+
+function M.validLabel(label)
+    return type(label) == "string" and #label >= 1 and #label <= M.MAX_LABEL_LEN
+        and label:find("%c") == nil
 end
 
 -- True when `raw` (the still-encoded datagram bytes) is too large to even be
@@ -159,20 +214,40 @@ function M.validatePairRequest(msg)
     if type(msg.code) ~= "string" or not msg.code:match(CODE_PATTERN) then
         return false, "malformed code"
     end
-    if type(msg.host) ~= "string" or #msg.host == 0 or #msg.host > M.MAX_HOST_LEN
-        or not msg.host:match(HOST_PATTERN) then
+    if not valid_host(msg.host) then
         return false, "malformed host"
     end
-    if type(msg.port) ~= "number" or msg.port ~= math.floor(msg.port)
-        or msg.port < M.MIN_PORT or msg.port > M.MAX_PORT then
+    if not valid_port(msg.port) then
         return false, "malformed port"
     end
-    if type(msg.fingerprint) ~= "string" or #msg.fingerprint ~= M.FINGERPRINT_HEX_LEN
-        or not msg.fingerprint:match(FINGERPRINT_PATTERN) then
+    if not valid_fingerprint(msg.fingerprint) then
         return false, "malformed fingerprint"
     end
     if not M.validNonceFormat(msg.nonce) then
         return false, "malformed nonce"
+    end
+    return true
+end
+
+-- Validates an already-decoded pair-OFFER payload table: `{ v, host, port,
+-- fingerprint, label }`. No code, no nonce -- see the KNOWN_TYPES comment
+-- above for why the redesigned ceremony no longer puts either on the wire.
+-- Like validatePairRequest, does not itself gate on a `type` field; routing
+-- is minfolio_pair.lua's job.
+function M.validatePairOffer(msg)
+    if type(msg) ~= "table" then return false, "not a table" end
+    if not M.isWellFormedVersion(msg.v) then return false, "malformed version" end
+    if not valid_host(msg.host) then
+        return false, "malformed host"
+    end
+    if not valid_port(msg.port) then
+        return false, "malformed port"
+    end
+    if not valid_fingerprint(msg.fingerprint) then
+        return false, "malformed fingerprint"
+    end
+    if not M.validLabel(msg.label) then
+        return false, "malformed label"
     end
     return true
 end

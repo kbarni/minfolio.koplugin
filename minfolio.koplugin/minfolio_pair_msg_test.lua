@@ -205,11 +205,131 @@ end
 
 check("minfolio-discover is a known type", PairMsg.isKnownType("minfolio-discover") == true)
 check("minfolio-pair-request is a known type", PairMsg.isKnownType("minfolio-pair-request") == true)
+-- minfolio-pair-offer became real as part of PAIRING_PLAN.md §4's ceremony
+-- redesign (WP 2/3): the Kindle now generates the verification code itself,
+-- so the offer datagram carries a label instead of a code/nonce. This is the
+-- SAME string the previous version of this test asserted was "NOT known ...
+-- not invented here" -- it has now, deliberately, been invented; see
+-- minfolio_pair_msg.lua's KNOWN_TYPES comment. The "must be ignored" check
+-- below moved to a genuinely still-hypothetical type name instead.
+check("minfolio-pair-offer is now a known type (PAIRING_PLAN.md §4 ceremony redesign)",
+    PairMsg.isKnownType("minfolio-pair-offer") == true)
 check("a hypothetical future type is NOT known (must be ignored, not invented here)",
-    PairMsg.isKnownType("minfolio-pair-offer") == false)
+    PairMsg.isKnownType("minfolio-pair-ack") == false)
 check("an empty string is not a known type", PairMsg.isKnownType("") == false)
 check("a nil type is not known", PairMsg.isKnownType(nil) == false)
 check("a non-string type is not known", PairMsg.isKnownType(123) == false)
+
+-- ---------------------------------------------------------------------------
+-- validatePairOffer: the happy path and per-field rejections. Shares its
+-- host/port/fingerprint checks with validatePairRequest (see
+-- minfolio_pair_msg.lua's shared `valid_host`/`valid_port`/`valid_fingerprint`
+-- locals), so this section focuses on what's actually different: no code, no
+-- nonce, and the new `label` field.
+-- ---------------------------------------------------------------------------
+
+local function valid_offer()
+    return {
+        host = "198.51.100.7",
+        port = 8443,
+        fingerprint = string.rep("a1", 32), -- 64 hex chars
+        label = "Kal's MacBook",
+    }
+end
+
+check("a well-formed offer passes validation", PairMsg.validatePairOffer(valid_offer()) == true)
+do
+    local m = valid_offer(); m.v = 1
+    check("an explicit v=1 offer still passes", PairMsg.validatePairOffer(m) == true)
+end
+do
+    local m = valid_offer(); m.v = 2
+    check("a numeric offer version other than 1 does not by itself cause rejection", PairMsg.validatePairOffer(m) == true)
+end
+do
+    local m = valid_offer(); m.v = "1"
+    check("a string-typed v field on an offer is rejected", PairMsg.validatePairOffer(m) == false)
+end
+
+check("nil offer message rejected", PairMsg.validatePairOffer(nil) == false)
+check("string offer message rejected", PairMsg.validatePairOffer("not a table") == false)
+check("number offer message rejected", PairMsg.validatePairOffer(42) == false)
+check("boolean offer message rejected", PairMsg.validatePairOffer(true) == false)
+
+do
+    local m = valid_offer(); m.host = ""
+    check("an offer with an empty host is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.host = "evil host"
+    check("an offer with a host containing a space is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.host = "fe80::1"
+    check("an offer with an IPv6 literal host is accepted", PairMsg.validatePairOffer(m) == true)
+end
+
+do
+    local m = valid_offer(); m.port = 0
+    check("an offer with port 0 is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.port = "8443"
+    check("an offer with a string port is rejected, not coerced", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.port = 65535
+    check("an offer with port 65535 (maximum) is accepted", PairMsg.validatePairOffer(m) == true)
+end
+
+do
+    local m = valid_offer(); m.fingerprint = string.rep("a", 63)
+    check("an offer with a fingerprint one char short of 64 is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.fingerprint = 12345
+    check("an offer with a numeric fingerprint is rejected", PairMsg.validatePairOffer(m) == false)
+end
+
+do
+    local m = valid_offer(); m.label = nil
+    check("an offer with no label at all is rejected (label is required, unlike pair-request which has none)",
+        PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = ""
+    check("an offer with an empty label is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = 123
+    check("an offer with a numeric label is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = string.rep("x", PairMsg.MAX_LABEL_LEN)
+    check("an offer label at exactly the length cap is accepted", PairMsg.validatePairOffer(m) == true)
+end
+do
+    local m = valid_offer(); m.label = string.rep("x", PairMsg.MAX_LABEL_LEN + 1)
+    check("an offer label one char over the length cap is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = "line one\nline two"
+    check("an offer label containing a newline (control char) is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = "tab\there"
+    check("an offer label containing a tab (control char) is rejected", PairMsg.validatePairOffer(m) == false)
+end
+do
+    local m = valid_offer(); m.label = "Café \xc3\xa9toile" -- multi-byte UTF-8, no ASCII control bytes
+    check("an offer label containing multi-byte UTF-8 is accepted (only ASCII control chars are rejected)",
+        PairMsg.validatePairOffer(m) == true)
+end
+
+check("validLabel accepts a plain ASCII label", PairMsg.validLabel("My PC") == true)
+check("validLabel rejects nil", PairMsg.validLabel(nil) == false)
+check("validLabel rejects a non-string", PairMsg.validLabel(42) == false)
+check("validLabel rejects an empty string", PairMsg.validLabel("") == false)
 
 -- ---------------------------------------------------------------------------
 -- Replayed nonce

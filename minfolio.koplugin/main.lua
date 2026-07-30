@@ -22,6 +22,13 @@ local App = require("minfolio_app")
 -- require graph, not read directly here -- only Minfolio:init's
 -- Pair.start() call site remains in this file).
 local Pair = require("minfolio_pair")
+-- Kindle pairing menu (PAIRING_PLAN.md WP 3): arm/disarm, the verification
+-- code, which channel is in play, and the paired-desktops list. Kept as its
+-- own module rather than grown inline here, same reasoning as Browser below
+-- -- this file is deliberately kept small (see ARCHITECTURE.md's local-
+-- variable-ceiling history). Required here only for its addToMainMenu call
+-- site below; owns no load-time side effects of its own.
+local PairMenu = require("minfolio_pair_menu")
 -- Notes browser (PLAN.md §5 Tier 5, §10 step 9) -- the last inline subsystem
 -- this file used to hold (dir listing/dialogs/edit_note). Required here for
 -- its load-time side effect (registering App.hooks.open_note/open_picker/
@@ -74,10 +81,26 @@ function Minfolio:onResume()
     -- Both operations wait for the screensaver/framework wake transition to settle.
     FL.scheduleWakeSync()
     Chrome.schedule_wake_repaint()
+    -- Lazily expires a stale armed pairing window (and its firewall rule)
+    -- the instant the device wakes, rather than waiting for the next
+    -- discovery tick -- see minfolio_pair.lua's M.isArmed for why this,
+    -- among several independent call sites, exists at all.
+    Pair.isArmed()
 end
 function Minfolio:onSuspend()
     Chrome.trace("plugin-suspend")
     FL.captureBeforeSuspend()
+end
+
+-- Called when KOReader tears down (confirmed convention in this same
+-- toolchain: kindle-hid-passthrough's HIDPassthrough:onCloseWidget, "Called
+-- when KOReader tears down"). Disarming here removes the pairing firewall
+-- rule on a clean exit; M.start's own startup sweep in minfolio_pair.lua is
+-- the backstop for the unclean-exit case this hook cannot cover (a crash or
+-- kill runs no Lua at all). Pair.disarm() is already a no-op when nothing is
+-- armed, so this is safe to call unconditionally on every teardown.
+function Minfolio:onCloseWidget()
+    Pair.disarm()
 end
 
 function Minfolio:onDispatcherRegisterActions()
@@ -109,6 +132,15 @@ function Minfolio:addToMainMenu(menu_items)
         text = _("Minfolio"),
         sorting_hint = "more_tools",
         callback = function() Browser.open_notes() end,
+    }
+    -- A separate top-level entry (following kshell.koplugin's own precedent
+    -- of registering several flat menu_items.* entries rather than nesting
+    -- them under one), so the existing "Minfolio" entry's one-tap "open
+    -- notes" behaviour above is completely unchanged.
+    menu_items.minfolio_pairing = {
+        text = _("Minfolio: pair desktop"),
+        sorting_hint = "more_tools",
+        callback = function() PairMenu.open() end,
     }
 end
 
