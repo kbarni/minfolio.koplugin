@@ -264,6 +264,39 @@ chmod 755 '$PLUGIN_DIR/minfolio_sync.sh'" \
     || die "verified transfer could not be swapped into place -- device may be in a mixed state, re-run deploy immediately"
 say "   $DEPLOY_COUNT file(s) live"
 
+# Prune modules that no longer exist locally. The swap above adds and
+# overwrites but never deletes, so a module removed from the source tree would
+# linger on the device and still be loadable -- and because `require` resolves
+# by name, a stale sibling can satisfy a require that should have failed,
+# leaving the device running code that no longer exists in the repo. That is a
+# nasty class of bug to chase, so remove the possibility.
+#
+# Deliberately conservative about WHAT it may delete: only files this plugin
+# owns (main.lua, _meta.lua, minfolio_*.lua, minfolio_*.sh) and never
+# config.lua, which is the device-local, gitignored user config and is absent
+# from the manifest precisely when the user has one and the developer does not.
+# Anything else a user has put in this directory is left alone.
+STALE="$(ssh_k "cd '$PLUGIN_DIR' 2>/dev/null || exit 0
+for f in *; do
+    [ -e \"\$f\" ] || continue
+    [ \"\$f\" = config.lua ] && continue
+    case \"\$f\" in
+        main.lua|_meta.lua|minfolio_*.lua|minfolio_*.sh) ;;
+        *) continue ;;
+    esac
+    case ' $DEPLOY_FILES ' in
+        *\" \$f \"*) ;;
+        *) echo \"\$f\" ;;
+    esac
+done")" || die "could not list the device plugin directory to check for stale modules"
+
+if [ -n "$STALE" ]; then
+    say "   removing $(printf '%s\n' "$STALE" | wc -l | tr -d ' ') stale file(s) no longer in the source tree:"
+    printf '     %s\n' $STALE
+    ssh_k "cd '$PLUGIN_DIR' && rm -f $(printf '%s ' $STALE)" \
+        || die "failed to remove stale files from the device"
+fi
+
 # ---- 4. Parse-check on the device ------------------------------------------
 # Glob evaluated ON THE DEVICE over whatever was actually deployed, so a
 # future module is covered with zero deploy.sh changes -- the same reason
