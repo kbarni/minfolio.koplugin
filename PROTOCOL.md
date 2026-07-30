@@ -269,22 +269,41 @@ that recovery directory older than 14 days are pruned automatically
 (`find ... -mtime +14 -delete`) on every worker start and at every teardown — it is a safety
 net, not a second permanent notes store.
 
-**The desktop side reportedly performs a three-way `diff3` merge and prompts the user only on
-a same-line conflict.** This claim is carried forward from `PLAN.md §9.2` and is **not
-verified from this repository** — the merge logic, if any, lives entirely in the desktop's
-TypeScript, which is not checked out here.
+**The desktop side, now verified.** The earlier revision of this document recorded the
+desktop's merge behaviour as unverified and flagged "whether a desktop edit can be discarded
+without a prompt" as an open question, on the belief that the desktop source was unavailable.
+It is available (`minfolio/electron/main.cjs` and `minfolio/src/main.ts`), and the answer is
+that **nothing is silently discarded on either side.**
 
-**Open question, explicitly not a finding: whether a desktop edit can be discarded without a
-prompt.** The worker does send `baseRevision` on every `submit()` (the revision the Kindle
-believed was current at save time, from `minfolio_sync.lua`'s own `revision` variable,
-updated only by successful `fetch()` calls). What the desktop server does when a submitted
-`baseRevision` is stale — whether it always attempts a merge, whether it can silently accept
-the Kindle's content as authoritative, or something else — is entirely a property of the
-desktop's own handler for `POST /kindle/sessions/<id>/submit`, and that handler is not present
-in this repository. This is recorded here as an open question because it was explicitly
-flagged as unconfirmed in `PLAN.md §9.2` and re-checking the Kindle-side code in this work
-package did not change that: the Kindle side sends `baseRevision`; what happens to it on
-receipt is outside what this repository can verify.
+`POST /kindle/sessions/<id>/submit` rejects a `baseRevision` only when it is out of range —
+below 1, or greater than the session's current revision — returning 409 with "fetch the
+latest snapshot and retry". A merely *stale* `baseRevision`, which is the interesting case, is
+accepted: the submission is queued as `{ content, baseRevision }` and the renderer is
+notified. The renderer then looks up that exact revision in the session's history to use as
+the merge ancestor and takes one of four paths:
+
+- **Ancestor unavailable** — it refuses to guess one (guessing would make every line added
+  since that snapshot look like a Kindle deletion) and writes the Kindle's content to a
+  conflict copy beside the note.
+- **Kindle content equals the ancestor** — a retry or no-op; the desktop buffer stands, so an
+  in-flight retry cannot yank the editor out from under someone typing.
+- **Desktop content equals the ancestor** — the Kindle's content is taken wholesale.
+- **Both diverged** — a three-way `merge3` against the ancestor. If it merges cleanly *and*
+  the result still contains the Kindle's text, the merge becomes canonical. Otherwise the
+  desktop buffer remains visible and the Kindle's full snapshot is written to a conflict copy.
+
+So the worst case is a conflict file on disk, never a lost edit. The source comment records
+that this replaced an earlier Kindle-authoritative fallback specifically to make the outcome
+lossless.
+
+The Kindle-side "priority" described above is therefore narrower than it sounds: submitting
+before fetching orders the Kindle's own outbox ahead of an incoming snapshot within a single
+worker tick. It does not give the Kindle authority over desktop content, because the desktop
+resolves the two against a real common ancestor rather than overwriting.
+
+One consequence worth knowing: a 409 does not lose the edit either. `submit()` removes the
+outbox file only on a 202, so a rejected submission is retried on the next tick, by which
+point `fetch()` has advanced `revision` to a value the desktop will accept.
 
 ## 7. Teardown
 
@@ -320,21 +339,29 @@ same cleanup (recovery-copy any unsent `outbox.md`, per §6, then `rm -rf` the w
 directory) and the worker process exits. Neither side needs to know which of the two actually
 triggered it.
 
-## 8. What is not verified from this repository
+## 8. Cross-checked against the desktop implementation
 
-Collected here for visibility, restating points made in context above:
+This document was originally written from the Kindle side alone, on the belief that the
+desktop source was unavailable. It is available, at `minfolio/` alongside this checkout, and
+the sections above have been reconciled against it. Note that repository currently carries two
+divergent copies of `main.cjs`; `package.json` names `electron/main.cjs` as the entry point and
+that is the one cited throughout.
 
-- The desktop's discovery/pairing UI, and whether it validates the Kindle's beacon/reply
-  payloads beyond what's shown here.
-- That `pairing.lua`'s persisted secret is read by the desktop over SSH, or used at all after
-  being written — inferred, not confirmed.
-- That the desktop actually launches `minfolio_sync.sh` over SSH and writes
-  `remote:<path>`/`remote-stop:<id>` to `/tmp/minfolio_launch` — inferred from
-  `minfolio_sync.sh`'s own comment and the shape of the descriptor contract, not observed.
-- The desktop's three-way `diff3` merge behaviour and its same-line-conflict prompting rule
-  (`PLAN.md §9.2`'s claim, carried forward, not independently re-verified here).
-- **Whether a stale `baseRevision` on a `submit()` can result in a desktop edit being
-  silently discarded without a user-visible prompt.** This is the specific open question
-  `PLAN.md §9.2` raised and asked this work package to resolve; it could not be resolved
-  because the desktop's handler for this case is not present in this repository. It remains
-  open.
+Confirmed by reading both sides:
+
+- The desktop never reads `pairing.lua`. It already holds the secret, because the Kindle sent
+  it in the `POST /kindle/pair` body and the desktop stored it in its own pairings file. The
+  Kindle's copy is written so the Kindle can recognise a previously paired desktop; verified by
+  the absence of any `pairing.lua` read in the desktop source.
+- The desktop does launch the worker over SSH and does write the launch flag, verified in
+  `minfolio/electron/main.cjs`: a single remote `sh -c` kills any previous worker, writes
+  `remote-session.lua`, starts `minfolio_sync.sh` under `nohup`, records its pid, writes
+  `remote:<path>` to `/tmp/minfolio_launch`, and starts KOReader if it is not already running.
+  Session stop writes `remote-stop:<id>` to the same flag.
+
+Still not verified, because it needs a running pair of devices rather than a second reading:
+
+- The desktop's discovery and pairing UI, and whether it validates the Kindle's beacon reply
+  beyond the type/nonce/id check in its listener.
+- Any of it end to end. Nothing in this document has been exercised against a live desktop
+  and Kindle since the Kindle side was split into modules.
