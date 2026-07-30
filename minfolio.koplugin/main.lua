@@ -36,6 +36,9 @@ rapidjson = require("rapidjson")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = Device.screen
+local MD = require("minfolio_md")
+local Text = require("minfolio_text")
+local MapModel = require("minfolio_map_model")
 
 local function now_seconds()
     return (socket and socket.gettime and socket.gettime()) or os.time()
@@ -295,12 +298,6 @@ local function read_file(path)
     f:close()
     return data
 end
-local function split_text_lines(text)
-    local lines = {}
-    for line in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do lines[#lines+1] = line end
-    if #lines == 0 then lines = { "" } end
-    return lines
-end
 local function read_frontlight_state()
     local ok, state = pcall(dofile, FL_STATE_PATH)
     return (ok and type(state) == "table") and state or {}
@@ -510,208 +507,6 @@ local function md_color(style)
     return Blitbuffer.COLOR_BLACK
 end
 
--- `hl` (highlight) is a background flag carried through recursion, orthogonal to
--- text style: everything parsed inside a ==...== region inherits it, so bold /
--- italic / code inside a highlight keep their own style AND get the highlight fill.
-local function md_inline(text, hl)
-    local spans, i, n, buf = {}, 1, #text, ""
-    local function push(t, s, display) if t ~= "" then spans[#spans+1] = { text = t, style = s, display = display, hl = hl or nil } end end
-    local function push_nested(inner, style)
-        for _, s in ipairs(md_inline(inner, hl)) do
-            if s.style ~= "syntax" then s.style = style end
-            spans[#spans+1] = s
-        end
-    end
-    while i <= n do
-        local c2 = text:sub(i, i+1)
-        local c1 = text:sub(i, i)
-        local closer, inner_start, marker
-        if c2 == "**" then marker = "**"; inner_start = i+2
-        elseif c2 == "==" then marker = "=="; inner_start = i+2
-        elseif c1 == "*" then marker = "*"; inner_start = i+1
-        elseif c1 == "`" then marker = "`"; inner_start = i+1
-        end
-        if marker then closer = text:find(marker, inner_start, true) end
-        if marker and closer then
-            push(buf, "normal"); buf = ""
-            if marker == "==" then
-                -- Recurse so the highlight's contents keep their own inline styles;
-                -- every returned span carries hl = true for the fill.
-                push(marker, "syntax", "")
-                for _, s in ipairs(md_inline(text:sub(inner_start, closer-1), true)) do spans[#spans+1] = s end
-                push(marker, "syntax", "")
-            else
-                local sty = (marker == "**") and "bold" or (marker == "*") and "italic" or "code"
-                push(marker, "syntax", "")
-                if marker == "`" then push(text:sub(inner_start, closer-1), sty)
-                else push_nested(text:sub(inner_start, closer-1), sty) end
-                push(marker, "syntax", "")
-            end
-            i = closer + #marker
-        else
-            buf = buf .. c1; i = i + 1
-        end
-    end
-    push(buf, "normal")
-    if #spans == 0 then spans[1] = { text = "", style = "normal", hl = hl or nil } end
-    return spans
-end
-
-local function md_tokenize(textstr)
-    local lines = {}
-    local function with_prefix(prefix, rest, block, display, style)
-        local spans = {}
-        if prefix and prefix ~= "" then spans[#spans+1] = { text = prefix, style = style or "syntax", display = display or "" } end
-        for _, s in ipairs(md_inline(rest)) do spans[#spans+1] = s end
-        return { block = block or "normal", spans = spans }
-    end
-    for line in (tostring(textstr or "") .. "\n"):gmatch("(.-)\n") do
-        local hashes, hrest = line:match("^(#+%s+)(.*)$")
-        if hashes then
-            local level = math.min(#hashes:gsub("%s", ""), 3)
-            lines[#lines+1] = { block = "h"..level, spans = {{ text = hashes, style = "syntax", display = "" }, { text = hrest, style = "h"..level }} }
-        else
-            local pre, rest = line:match("^(%s*[%-%*%+]%s+)(.*)$")
-            local ordered = false
-            if not pre then
-                pre, rest = line:match("^(%s*%d+%.%s+)(.*)$")
-                ordered = pre ~= nil
-            end
-            if pre then
-                local task, taskrest = rest:match("^(%[[ xX]%]%s+)(.*)$")
-                local spans = {}
-                spans[#spans+1] = { text = pre, style = "bullet", display = task and "" or (ordered and pre:gsub("^%s+", "") or "\226\128\162 ") }
-                if task then
-                    local checked = task:match("%[[xX]%]") ~= nil
-                    spans[#spans+1] = { text = task, style = "task", display = checked and "\226\152\145 " or "\226\152\144 " }
-                    rest = taskrest
-                end
-                for _, s in ipairs(md_inline(rest)) do spans[#spans+1] = s end
-                -- Keep the leading whitespace so nested items render indented; the
-                -- marker span's display drops it (fixed glyph), so the indent is
-                -- reapplied as real horizontal space in layoutLine.
-                lines[#lines+1] = { block = "bullet", spans = spans, indent_ws = pre:match("^%s*") or "" }
-            else
-                local task, taskrest = line:match("^(%s*%[[ xX]%]%s+)(.*)$")
-                if task then
-                    local checked = task:match("%[[xX]%]") ~= nil
-                    local tok = with_prefix(task, taskrest, "bullet", checked and "\226\152\145 " or "\226\152\144 ", "task")
-                    tok.indent_ws = task:match("^%s*") or ""
-                    lines[#lines+1] = tok
-                else
-                    if line:match("^>%s?") then
-                        pre, rest = line:match("^(>%s?)(.*)$")
-                        lines[#lines+1] = with_prefix(pre, rest, "quote", "", "syntax")
-                    else
-                        lines[#lines+1] = { block = "normal", spans = md_inline(line) }
-                    end
-                end
-            end
-        end
-    end
-    return lines
-end
-
-local function md_trim(s)
-    return tostring(s or ""):match("^%s*(.-)%s*$") or ""
-end
-
--- Markdown tables are permitted inside blockquotes.  Keep the prefix out of
--- the table grammar, but retain its byte width so cell edits still replace the
--- correct ranges in the original source line.
-local function md_table_row_prefix(line)
-    return tostring(line or ""):match("^(%s*>%s?)") or ""
-end
-
-local function md_split_table_row(line)
-    line = tostring(line or "")
-    local prefix = md_table_row_prefix(line)
-    local source_offset = #prefix
-    if source_offset > 0 then line = line:sub(source_offset + 1) end
-    if not line:find("|", 1, true) then return nil end
-    local first_pipe = line:find("|", 1, true)
-    local last_pipe
-    local pos = 1
-    while true do
-        local p = line:find("|", pos, true)
-        if not p then break end
-        last_pipe = p
-        pos = p + 1
-    end
-    if not first_pipe or not last_pipe then return nil end
-
-    local leading = line:match("^%s*|") ~= nil
-    local trailing = line:match("|%s*$") ~= nil
-    local start_pos = leading and (first_pipe + 1) or 1
-    local end_pos = trailing and (last_pipe - 1) or #line
-    if end_pos < start_pos then return nil end
-
-    local cells = {}
-    local cell_start = start_pos
-    while cell_start <= end_pos + 1 do
-        local pipe = line:find("|", cell_start, true)
-        if not pipe or pipe > end_pos then pipe = end_pos + 1 end
-        local raw_start, raw_end = cell_start, pipe - 1
-        local raw = raw_start <= raw_end and line:sub(raw_start, raw_end) or ""
-        local leading_ws = raw:match("^(%s*)") or ""
-        local trailing_ws = raw:match("(%s*)$") or ""
-        local text_start = raw_start + #leading_ws
-        local text_end = raw_end - #trailing_ws
-        local text = md_trim(raw)
-        if text == "" then
-            text_start = raw_start
-            text_end = raw_start - 1
-        end
-        cells[#cells+1] = {
-            text = text,
-            start_col = math.max(0, source_offset + text_start - 1),
-            end_col = math.max(0, source_offset + text_end),
-        }
-        cell_start = pipe + 1
-        if pipe > end_pos then break end
-    end
-    if #cells < 2 then return nil end
-    return cells, prefix
-end
-
-local function md_table_separator(cells)
-    if not cells or #cells < 2 then return nil end
-    local aligns = {}
-    for i, cell in ipairs(cells) do
-        local spec = md_trim(cell.text):gsub("%s+", "")
-        if not spec:match("^:?-+:?$") then return nil end
-        if spec:match("^:") and spec:match(":$") then aligns[i] = "center"
-        elseif spec:match(":$") then aligns[i] = "right"
-        else aligns[i] = "left" end
-    end
-    return aligns
-end
-
-local function md_table_block(lines, start_i)
-    local header, prefix = md_split_table_row(lines[start_i])
-    if not header then return nil end
-    local sep, sep_prefix = md_split_table_row(lines[start_i + 1])
-    if prefix ~= sep_prefix then return nil end
-    local aligns = md_table_separator(sep)
-    if not aligns then return nil end
-    local ncols = #sep
-    if #header < ncols then return nil end
-
-    local rows = {
-        { line = start_i, cells = header, header = true },
-    }
-    local finish = start_i + 1
-    local i = start_i + 2
-    while i <= #lines do
-        local cells, row_prefix = md_split_table_row(lines[i])
-        if not cells or row_prefix ~= prefix or #cells < 2 or md_table_separator(cells) then break end
-        rows[#rows+1] = { line = i, cells = cells }
-        finish = i
-        i = i + 1
-    end
-    return { start = start_i, finish = finish, ncols = ncols, aligns = aligns, rows = rows }
-end
-
 -- ============================ Live styled markdown editor (Phase 1) ============================
 -- Shift map for BT-keyboard symbol keys (used by MDEdit:onKeyPress).
 local SHIFT_SYM = {
@@ -739,54 +534,6 @@ local KEYBOARD_EVENT_MAP = {
     [105]="Left", [106]="Right", [107]="End", [108]="Down", [109]="PageDown", [110]="Ins", [111]="Del",
     [114]="VMinus", [115]="VPlus", [116]="Power", [119]="Pause", [125]="Meta", [126]="Meta", [127]="Menu", [139]="Menu",
 }
--- UTF-8 cursor helpers: move/delete by whole characters, not bytes (continuation bytes are 0x80..0xBF)
-local function utf8_left(s, c)
-    if c <= 0 then return 0 end
-    c = c - 1
-    while c > 0 do local b = s:byte(c+1); if b and b >= 0x80 and b < 0xC0 then c = c - 1 else break end end
-    return c
-end
-local function utf8_right(s, c)
-    if c >= #s then return #s end
-    c = c + 1
-    while c < #s do local b = s:byte(c+1); if b and b >= 0x80 and b < 0xC0 then c = c + 1 else break end end
-    return c
-end
-local function utf8_snap(s, c)        -- snap a byte index back to the nearest char boundary
-    while c > 0 and c < #s do local b = s:byte(c+1); if b and b >= 0x80 and b < 0xC0 then c = c - 1 else break end end
-    return c
-end
-local function char_is_space(s)
-    return s ~= "" and s:match("^%s$") ~= nil
-end
-local function prev_word_col(s, c)
-    local p = math.max(0, math.min(c or 0, #s))
-    while p > 0 do
-        local q = utf8_left(s, p)
-        if not char_is_space(s:sub(q + 1, p)) then break end
-        p = q
-    end
-    while p > 0 do
-        local q = utf8_left(s, p)
-        if char_is_space(s:sub(q + 1, p)) then break end
-        p = q
-    end
-    return p
-end
-local function next_word_col(s, c)
-    local p = math.max(0, math.min(c or 0, #s))
-    while p < #s do
-        local q = utf8_right(s, p)
-        if not char_is_space(s:sub(p + 1, q)) then break end
-        p = q
-    end
-    while p < #s do
-        local q = utf8_right(s, p)
-        if char_is_space(s:sub(p + 1, q)) then break end
-        p = q
-    end
-    return p
-end
 local function keymod(mods, name)
     if not mods then return nil end
     if type(mods) == "string" then
@@ -880,25 +627,13 @@ end
 local function down_key(name)
     return name == "Down" or name == "ArrowDown" or name == "KEY_DOWN" or name == "CursorDown"
 end
-local function copy_arr(t) local r = {}; for i = 1, #t do r[i] = t[i] end; return r end
 local md_clipboard = ""               -- shared across notes
-local function path_join(dir, name)
-    if dir == "/" then return "/" .. name end
-    return dir .. "/" .. name
-end
 local function path_parent(path)
     path = tostring(path or NOTES_DIR):gsub("/+$", "")
     if path == "" or path == "/" then return "/" end
     local p = path:match("^(.*)/[^/]+$")
     if not p or p == "" then return "/" end
     return p
-end
-local function path_base(path)
-    local p = tostring(path or ""):gsub("/+$", "")
-    return p:match("[^/]+$") or p
-end
-local function is_markdown_file(name)
-    return tostring(name or ""):lower():match("%.md$") ~= nil
 end
 local function file_signature(path)
     local ok, attr = pcall(lfs.attributes, path)
@@ -1000,111 +735,8 @@ local MINDMAP_PAN_STEP = Screen:scaleBySize(100)
 local MINDMAP_PAN_MIN_VISIBLE = Screen:scaleBySize(80)
 
 -- ============================ Native Markdown mindmap ============================
--- Mirrors the desktop mindmap's forgiving parser: headings, lists, paragraphs,
--- blockquotes and fenced code blocks all become nodes in one depth stack. The
--- Kindle view stays native and edits Markdown ranges directly, so the editor and
--- map share one source of truth and one interpretation.
-local function mindmap_node(kind, text, line, depth, extra)
-    local node = {
-        kind = kind,
-        text = md_trim(text),
-        line = line,
-        depth = depth or 1,
-        children = {},
-    }
-    if extra then for k, v in pairs(extra) do node[k] = v end end
-    return node
-end
-
-local function parse_mindmap(markdown, title)
-    local lines = split_text_lines(tostring(markdown or ""):gsub("\r\n", "\n"))
-    local root = mindmap_node("root", title or "Mindmap", 1, 0)
-    local stack = { { depth = 0, node = root } }
-    local heading_level = 0
-    local i = 1
-
-    local function attach(depth, node)
-        while #stack > 1 and stack[#stack].depth >= depth do table.remove(stack) end
-        local parent = stack[#stack].node
-        node.parent = parent
-        parent.children[#parent.children+1] = node
-        stack[#stack+1] = { depth = depth, node = node }
-    end
-
-    while i <= #lines do
-        local line = lines[i] or ""
-        if md_trim(line) == "" then
-            i = i + 1
-        else
-            local hashes, htext = line:match("^(#{1,6})%s+(.*)$")
-            if hashes then
-                local level = #hashes
-                heading_level = level
-                attach(level, mindmap_node("heading", htext, i, level, { level = level }))
-                i = i + 1
-            else
-                local fence, info = line:match("^%s*(```)(.*)$")
-                if not fence then fence, info = line:match("^%s*(~~~)(.*)$") end
-                if fence then
-                    local marker = fence
-                    local start_line = i
-                    local raw = { line }
-                    i = i + 1
-                    while i <= #lines do
-                        raw[#raw+1] = lines[i]
-                        if lines[i]:match("^%s*" .. marker) then i = i + 1; break end
-                        i = i + 1
-                    end
-                    attach(heading_level + 1, mindmap_node("code", (md_trim(info) ~= "" and ("``` " .. md_trim(info)) or "``` code"), start_line, heading_level + 1, { raw = raw }))
-                elseif line:match("^%s*>") then
-                    local start_line = i
-                    local parts = {}
-                    while i <= #lines and (lines[i] or ""):match("^%s*>") do
-                        parts[#parts+1] = (lines[i] or ""):gsub("^%s*>%s?", "")
-                        i = i + 1
-                    end
-                    attach(heading_level + 1, mindmap_node("quote", md_trim(table.concat(parts, " ")) ~= "" and table.concat(parts, " ") or "Quote", start_line, heading_level + 1))
-                else
-                    local indent, marker, rest = line:match("^(%s*)([-*+]%s+)(.*)$")
-                    local ordered = false
-                    if not marker then
-                        indent, marker, rest = line:match("^(%s*)(%d+[.)]%s+)(.*)$")
-                        ordered = marker ~= nil
-                    end
-                    if marker then
-                        local nindent = #(tostring(indent or ""):gsub("\t", "  "))
-                        local depth = heading_level + 1 + math.floor(nindent / 2)
-                        local task, body = rest:match("^(%[[ xX]%]%s+)(.*)$")
-                        attach(depth, mindmap_node("list", task and body or rest, i, depth, {
-                            marker = marker,
-                            ordered = ordered,
-                            task = task,
-                        }))
-                        i = i + 1
-                    else
-                        local start_line = i
-                        local parts = {}
-                        while i <= #lines do
-                            local l = lines[i] or ""
-                            if md_trim(l) == "" then break end
-                            if l:match("^(#{1,6})%s+") or l:match("^%s*[-*+]%s+") or l:match("^%s*%d+[.)]%s+")
-                                or l:match("^%s*>") or l:match("^%s*```") or l:match("^%s*~~~") then break end
-                            parts[#parts+1] = l
-                            i = i + 1
-                        end
-                        attach(heading_level + 1, mindmap_node("paragraph", table.concat(parts, "\n"), start_line, heading_level + 1))
-                    end
-                end
-            end
-        end
-    end
-
-    if #root.children == 0 then
-        root.children[1] = mindmap_node("heading", "Mindmap", 1, 1, { level = 1, parent = root })
-    end
-    return root
-end
-
+-- Tree parsing/model moved to minfolio_map_model.lua (PLAN.md §5 Tier 0); this file now only
+-- holds the KOReader-dependent view (MindmapCanvas/MindmapView) that renders it.
 local MindmapCanvas = Widget:extend{}
 function MindmapCanvas:getSize() return self.dimen end
 function MindmapCanvas:paintTo(bb, x, y)
@@ -1182,7 +814,7 @@ function MindmapView:init()
     self.scale = self.editor and self.editor.scale or clamp_minfolio_scale(MINFOLIO_STATE.scale)
     self.parent = self
     self.path = self.editor and self.editor.path or ""
-    self.root = parse_mindmap(self.editor and self.editor:currentText() or "", path_base(self.path))
+    self.root = MapModel.parse_mindmap(self.editor and self.editor:currentText() or "", Text.path_base(self.path))
     self.rows, self.selected, self._undo, self.top_zones = {}, 1, {}, {}
     self.zoom, self.pan_x, self.pan_y = 1, 0, 0
     self.caret_on, self._map_caret_blinking = true, true
@@ -1231,7 +863,7 @@ function MindmapView:flatten()
         for _, child in ipairs(node.children or {}) do walk(child, depth + 1) end
     end
     for _, child in ipairs(self.root.children or {}) do walk(child, 0) end
-    local text_lines = split_text_lines(self.editor and self.editor:currentText() or "")
+    local text_lines = Text.split_text_lines(self.editor and self.editor:currentText() or "")
     for i, entry in ipairs(rows) do
         local finish = #text_lines
         for j = i + 1, #rows do if rows[j].depth <= entry.depth then finish = math.max(entry.node.line, rows[j].node.line - 1); break end end
@@ -1250,12 +882,12 @@ function MindmapView:nodeStyle(node)
 end
 
 function MindmapView:nodeText(node)
-    local text = md_trim(node.text)
+    local text = MD.md_trim(node.text)
     text = text:gsub("^#{1,6}%s+", "")
     if node.kind == "list" and node.task then text = (node.task:match("%[[xX]%]") and "[x] " or "[ ] ") .. text end
     if node.kind == "paragraph" then text = text:gsub("%s*\n%s*", " ") end
     local plain = {}
-    for _, span in ipairs(md_inline(text)) do
+    for _, span in ipairs(MD.md_inline(text)) do
         if span.style ~= "syntax" then plain[#plain+1] = span.display or span.text or "" end
     end
     text = table.concat(plain)
@@ -1441,7 +1073,7 @@ function MindmapView:beginNodeEdit(index)
     local entry = self.rows and self.rows[index]
     if not entry or not self.editor then return end
     self.selected = index
-    local line = (split_text_lines(self.editor:currentText()))[entry.node.line] or ""
+    local line = (Text.split_text_lines(self.editor:currentText()))[entry.node.line] or ""
     self.editing_index, self.edit_line = index, entry.node.line
     self.caret_on = true
     self.edit_prefix = self:linePrefix(line)
@@ -1467,7 +1099,7 @@ function MindmapView:commitNodeEdit()
     if not self.editing_index or not self.editor then return false end
     local line, prefix = self.edit_line, self.edit_prefix
     local text = tostring(self.edit_text or ""):gsub("[\r\n]+", " ")
-    local lines = split_text_lines(self.editor:currentText())
+    local lines = Text.split_text_lines(self.editor:currentText())
     local changed = lines[line] ~= (prefix .. text)
     local entry = self.rows and self.rows[self.editing_index]
     if entry then entry.node._edit_text = nil end
@@ -1505,20 +1137,20 @@ function MindmapView:addChars(chars)
 end
 function MindmapView:delChar()
     if self.editing_index and self.edit_col > 0 then
-        local start = utf8_left(self.edit_text, self.edit_col)
+        local start = Text.utf8_left(self.edit_text, self.edit_col)
         self.edit_text, self.edit_col = self.edit_text:sub(1, start) .. self.edit_text:sub(self.edit_col + 1), start
         self:updateEditLayout()
     end
 end
 function MindmapView:delWord()
     if not self.editing_index then return end
-    local start, old = prev_word_col(self.edit_text, self.edit_col), self.edit_col
+    local start, old = Text.prev_word_col(self.edit_text, self.edit_col), self.edit_col
     self.edit_text, self.edit_col = self.edit_text:sub(1, start) .. self.edit_text:sub(old + 1), start
     self:updateEditLayout()
 end
 function MindmapView:delToStartOfLine() if self.editing_index then self.edit_text = self.edit_text:sub(self.edit_col + 1); self.edit_col = 0; self:updateEditLayout() end end
-function MindmapView:leftChar() if self.editing_index then self.edit_col = utf8_left(self.edit_text, self.edit_col); self:updateEditLayout() end end
-function MindmapView:rightChar() if self.editing_index then self.edit_col = utf8_right(self.edit_text, self.edit_col); self:updateEditLayout() end end
+function MindmapView:leftChar() if self.editing_index then self.edit_col = Text.utf8_left(self.edit_text, self.edit_col); self:updateEditLayout() end end
+function MindmapView:rightChar() if self.editing_index then self.edit_col = Text.utf8_right(self.edit_text, self.edit_col); self:updateEditLayout() end end
 function MindmapView:goToStartOfLine() if self.editing_index then self.edit_col = 0; self:updateEditLayout() end end
 function MindmapView:goToEndOfLine() if self.editing_index then self.edit_col = #self.edit_text; self:updateEditLayout() end end
 function MindmapView:upLine() end
@@ -1548,7 +1180,7 @@ end
 function MindmapView:topBar(cw)
     local title_face = Font:getFace("cfont", 22)
     local action_face = Font:getFace("cfont", 19)
-    local raw_title = (path_base(self.path) ~= "" and path_base(self.path) or "Mindmap")
+    local raw_title = (Text.path_base(self.path) ~= "" and Text.path_base(self.path) or "Mindmap")
     local labels = {
         { name = "add", text = "Add" },
         { name = "delete", text = "Del" },
@@ -1619,7 +1251,7 @@ function MindmapView:selectedEntry()
 end
 
 function MindmapView:reloadFromEditor(keep_line)
-    self.root = parse_mindmap(self.editor and self.editor:currentText() or "", path_base(self.path))
+    self.root = MapModel.parse_mindmap(self.editor and self.editor:currentText() or "", Text.path_base(self.path))
     self:flatten()
     self:layoutMap()
     if keep_line then
@@ -1645,7 +1277,7 @@ end
 function MindmapView:applyLines(lines, keep_line)
     if not self.editor then return false end
     local text = table.concat(lines, "\n")
-    self.editor.lines = split_text_lines(text)
+    self.editor.lines = Text.split_text_lines(text)
     self.editor.crow = math.max(1, math.min(keep_line or self.editor.crow or 1, #self.editor.lines))
     self.editor.ccol = math.max(0, math.min(self.editor.ccol or 0, #(self.editor.lines[self.editor.crow] or "")))
     self.editor.sel = nil
@@ -1659,7 +1291,7 @@ end
 function MindmapView:undo()
     local snap = self._undo and table.remove(self._undo)
     if not snap or not self.editor then return notify(_("Nothing to undo")) end
-    self.editor.lines = split_text_lines(snap.text or "")
+    self.editor.lines = Text.split_text_lines(snap.text or "")
     self.editor._vrows_dirty = true
     self.editor:save()
     self.selected = snap.selected or 1
@@ -1720,16 +1352,16 @@ end
 
 function MindmapView:addChild()
     if self.selected == 0 and self.editor then
-        local lines = split_text_lines(self.editor:currentText())
+        local lines = Text.split_text_lines(self.editor:currentText())
         self:snapshot()
-        if #lines > 0 and md_trim(lines[#lines] or "") ~= "" then table.insert(lines, "") end
+        if #lines > 0 and MD.md_trim(lines[#lines] or "") ~= "" then table.insert(lines, "") end
         table.insert(lines, "# New node")
         return self:applyLines(lines, #lines)
     end
     local entry = self:selectedEntry()
     if not entry or not self.editor then return end
     local first, finish = self:rangeFor(self.selected)
-    local lines = split_text_lines(self.editor:currentText())
+    local lines = Text.split_text_lines(self.editor:currentText())
     local line = lines[first] or ""
     local kind, level = self:lineKind(line)
     local new_line
@@ -1748,7 +1380,7 @@ end
 function MindmapView:deleteSelected()
     local first, finish = self:rangeFor(self.selected)
     if not first or not self.editor then return end
-    local lines = split_text_lines(self.editor:currentText())
+    local lines = Text.split_text_lines(self.editor:currentText())
     self:snapshot()
     for _ = first, finish do table.remove(lines, first) end
     if #lines == 0 then lines[1] = "" end
@@ -1761,7 +1393,7 @@ function MindmapView:moveSibling(dir)
     if not other or not self.editor then return notify(_("No sibling there")) end
     local a1, a2 = self:rangeFor(self.selected)
     local b1, b2 = self:rangeFor(other)
-    local lines = split_text_lines(self.editor:currentText())
+    local lines = Text.split_text_lines(self.editor:currentText())
     self:snapshot()
     if dir < 0 then
         local block_a, block_b = {}, {}
@@ -1787,7 +1419,7 @@ end
 function MindmapView:reattach(dir)
     local first, finish = self:rangeFor(self.selected)
     if not first or not self.editor then return end
-    local lines = split_text_lines(self.editor:currentText())
+    local lines = Text.split_text_lines(self.editor:currentText())
     local line = lines[first] or ""
     local kind, level = self:lineKind(line)
     if dir < 0 and ((kind == "heading" and level <= 1) or (kind == "list" and level <= 0) or kind == "paragraph") then
@@ -2055,7 +1687,7 @@ function MDEdit:init()
     self._caret_blinking = true
     self.reader_mode = false
     local text = read_file(self.path) or ""
-    self.lines = split_text_lines(text)
+    self.lines = Text.split_text_lines(text)
     -- The editor never owns a socket. A separate process does TLS and leaves
     -- only local, atomically-written files for this widget to consume.
     self.remote_revision = self.remote and tonumber(self.remote.revision) or 0
@@ -2386,7 +2018,7 @@ function MDEdit:pointToCursor(pos)
             local raw_col
             if rm.table then raw_col = self:tableColAtX(rm, pos.x - MDEDIT_PAD)
             else raw_col = self:colAtX(rm.row, pos.x - MDEDIT_PAD) end
-            local col = utf8_snap(self.lines[rm.line], raw_col)
+            local col = Text.utf8_snap(self.lines[rm.line], raw_col)
             return rm.line, col
         end
         local dist = pos.y < rm.y0 and (rm.y0 - pos.y) or (pos.y - rm.y1)
@@ -2398,7 +2030,7 @@ function MDEdit:pointToCursor(pos)
         local raw_col
         if nearest.table then raw_col = self:tableColAtX(nearest, pos.x - MDEDIT_PAD)
         else raw_col = self:colAtX(nearest.row, pos.x - MDEDIT_PAD) end
-        return nearest.line, utf8_snap(self.lines[nearest.line], raw_col)
+        return nearest.line, Text.utf8_snap(self.lines[nearest.line], raw_col)
     end
     if pos.y < (self.row_map and self.row_map[1] and self.row_map[1].y0 or self.fh) then
         return self.row_map and self.row_map[1] and self.row_map[1].line or self.top, 0
@@ -2409,7 +2041,7 @@ function MDEdit:pointToCursor(pos)
 end
 function MDEdit:visibleWordRange(row, col)
     local line = self.lines[row] or ""
-    local toks = md_tokenize(line)[1]
+    local toks = MD.md_tokenize(line)[1]
     local byte, target, prev_visible = 0, nil, nil
     for _, span in ipairs(toks.spans or {}) do
         local raw = span.text or ""
@@ -2433,10 +2065,10 @@ function MDEdit:visibleWordRange(row, col)
     if not target then return nil end
     local start_col, end_col, raw = target[1], target[2], target[3]
     local local_col = math.max(0, math.min(#raw, col - start_col))
-    local lo, hi = prev_word_col(raw, local_col), next_word_col(raw, local_col)
+    local lo, hi = Text.prev_word_col(raw, local_col), Text.next_word_col(raw, local_col)
     if lo == hi and #raw > 0 then
-        if local_col <= 0 then hi = next_word_col(raw, 0)
-        else lo = prev_word_col(raw, utf8_left(raw, local_col)) end
+        if local_col <= 0 then hi = Text.next_word_col(raw, 0)
+        else lo = Text.prev_word_col(raw, Text.utf8_left(raw, local_col)) end
     end
     if lo == hi then return start_col, end_col end
     return start_col + lo, start_col + hi
@@ -2445,8 +2077,8 @@ function MDEdit:selectWordAt(pos)
     local row, col = self:pointToCursor(pos)
     local line = self.lines[row] or ""
     local lo, hi = self:visibleWordRange(row, col)
-    if not lo then lo, hi = prev_word_col(line, col), next_word_col(line, col) end
-    if lo == hi and #line > 0 then hi = utf8_right(line, lo) end
+    if not lo then lo, hi = Text.prev_word_col(line, col), Text.next_word_col(line, col) end
+    if lo == hi and #line > 0 then hi = Text.utf8_right(line, lo) end
     self._desired_x = nil
     self.sel = { row = row, col = lo }
     self.crow, self.ccol = row, hi
@@ -2455,9 +2087,9 @@ end
 function MDEdit:currentWordRange()
     local line = self.lines[self.crow] or ""
     if line == "" then return nil end
-    local lo, hi = prev_word_col(line, self.ccol), next_word_col(line, self.ccol)
-    if lo == hi and self.ccol > 0 then lo = prev_word_col(line, utf8_left(line, self.ccol)) end
-    if lo == hi and self.ccol < #line then hi = next_word_col(line, utf8_right(line, self.ccol)) end
+    local lo, hi = Text.prev_word_col(line, self.ccol), Text.next_word_col(line, self.ccol)
+    if lo == hi and self.ccol > 0 then lo = Text.prev_word_col(line, Text.utf8_left(line, self.ccol)) end
+    if lo == hi and self.ccol < #line then hi = Text.next_word_col(line, Text.utf8_right(line, self.ccol)) end
     if lo ~= hi then return lo, hi end
     return nil
 end
@@ -2536,7 +2168,7 @@ function MDEdit:renderRow(row)
 end
 function MDEdit:tableInlineSpans(text, base_style)
     local spans = {}
-    for _, span in ipairs(md_inline(tostring(text or ""))) do
+    for _, span in ipairs(MD.md_inline(tostring(text or ""))) do
         if span.style ~= "syntax" then
             local style = span.style == "normal" and base_style or span.style
             local display = span.display == nil and span.text or span.display
@@ -2582,12 +2214,12 @@ function MDEdit:wrapTableCell(text, base_style, maxw)
                 while rest ~= "" do
                     local i, piece = 0, ""
                     while true do
-                        local nxt = utf8_right(rest, i)
+                        local nxt = Text.utf8_right(rest, i)
                         if nxt == i then break end
                         local candidate = rest:sub(1, nxt)
                         if self:wordw(candidate, span.style) <= maxw then piece, i = candidate, nxt else break end
                     end
-                    if piece == "" then piece = rest:sub(1, math.max(1, utf8_right(rest, 0))) end
+                    if piece == "" then piece = rest:sub(1, math.max(1, Text.utf8_right(rest, 0))) end
                     append(piece, span.style, span.hl)
                     rest = rest:sub(#piece + 1)
                     if rest ~= "" then finish_row() end
@@ -2842,14 +2474,14 @@ function MDEdit:openTableCellEditor(hit)
     if input then
         local function input_prev_word_pos()
             local p = math.max(1, math.min(input.charpos or 1, #(input.charlist or {}) + 1))
-            while p > 1 and char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
-            while p > 1 and not char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
+            while p > 1 and Text.char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
+            while p > 1 and not Text.char_is_space(input.charlist[p - 1] or "") do p = p - 1 end
             return p
         end
         local function input_next_word_pos()
             local p = math.max(1, math.min(input.charpos or 1, #(input.charlist or {}) + 1))
-            while p <= #(input.charlist or {}) and char_is_space(input.charlist[p] or "") do p = p + 1 end
-            while p <= #(input.charlist or {}) and not char_is_space(input.charlist[p] or "") do p = p + 1 end
+            while p <= #(input.charlist or {}) and Text.char_is_space(input.charlist[p] or "") do p = p + 1 end
+            while p <= #(input.charlist or {}) and not Text.char_is_space(input.charlist[p] or "") do p = p + 1 end
             return p
         end
         local function input_del_word_left()
@@ -2947,7 +2579,7 @@ function MDEdit:computeVisualRows(text_w)
         local text = self.lines[i]
         local entry = cache[text] or (prev and prev[text])
         if not entry then
-            local toks = md_tokenize(text)[1]
+            local toks = MD.md_tokenize(text)[1]
             entry = { rows = self:layoutLine(toks, text_w), block = toks.block }
         end
         cache[text] = entry
@@ -2963,7 +2595,7 @@ function MDEdit:computeVisualRows(text_w)
         -- Tables render as tables in every mode (edit and reader). Cells are
         -- edited by tapping them (openTableCellEditor); the raw pipe syntax is
         -- never shown as plain text.
-        local tbl = md_table_block(self.lines, i)
+        local tbl = MD.md_table_block(self.lines, i)
         if tbl then
             for _, entry in ipairs(self:layoutTable(tbl, text_w)) do
                 out[#out+1] = entry
@@ -3029,7 +2661,7 @@ function MDEdit:updateVisualLine(line)
     for vi = range.first, range.last do
         if vrows[vi].kind ~= "row" then return false end
     end
-    local toks = md_tokenize(text)[1]
+    local toks = MD.md_tokenize(text)[1]
     local replacement = {}
     for ri, row in ipairs(self:layoutLine(toks, text_w)) do
         replacement[#replacement+1] = { kind = "row", line = line, row = row, block = toks.block, ri = ri }
@@ -3086,7 +2718,7 @@ function MDEdit:moveCursorVisual(drow)
     if not vr or vr.kind ~= "row" then return true end
     self._desired_x = target_x
     self.crow = vr.line
-    self.ccol = utf8_snap(self.lines[self.crow], self:colAtX(vr.row, target_x))
+    self.ccol = Text.utf8_snap(self.lines[self.crow], self:colAtX(vr.row, target_x))
     return true
 end
 function MDEdit:visualRowHeight(vr)
@@ -3343,7 +2975,7 @@ function MDEdit:previousGlyphX(row, col)
     for _, seg in ipairs(row.segs or {}) do raw[#raw+1] = seg.text or "" end
     raw = table.concat(raw)
     local local_col = math.max(0, math.min(#raw, (col or row.sb or 0) - (row.sb or 0)))
-    local prev_col = utf8_left(raw, local_col)
+    local prev_col = Text.utf8_left(raw, local_col)
     return self:rowXAt(row, (row.sb or 0) + prev_col)
 end
 -- Regions changed by an insertion/deletion within one logical line. The first
@@ -3600,7 +3232,7 @@ function MDEdit:checkRemoteInbox()
     self.remote_revision = revision
     if text == self:currentText() then return end
     write_file(self.path, text)
-    self.lines = split_text_lines(text)
+    self.lines = Text.split_text_lines(text)
     self.crow = math.max(1, math.min(self.crow or 1, #self.lines))
     self.ccol = math.max(0, math.min(self.ccol or 0, #(self.lines[self.crow] or "")))
     self.sel, self._desired_x, self._burst = nil, nil, nil
@@ -3633,7 +3265,7 @@ end
 function MDEdit:reloadFromDisk(text, sig)
     if text == nil then text = read_file(self.path) end
     if text == nil then return false end
-    self.lines = split_text_lines(text)
+    self.lines = Text.split_text_lines(text)
     self.crow = math.max(1, math.min(self.crow or 1, #self.lines))
     self.ccol = math.max(0, math.min(self.ccol or 0, #(self.lines[self.crow] or "")))
     self.sel = nil
@@ -3725,7 +3357,7 @@ end
 function MDEdit:snapshot()
     self:scheduleAutosave()
     self._undo = self._undo or {}
-    self._undo[#self._undo+1] = { lines = copy_arr(self.lines), crow = self.crow, ccol = self.ccol }
+    self._undo[#self._undo+1] = { lines = Text.copy_arr(self.lines), crow = self.crow, ccol = self.ccol }
     if #self._undo > 80 then table.remove(self._undo, 1) end
     self._redo = {}
 end
@@ -3755,7 +3387,7 @@ function MDEdit:_restore(stack, other)
         self.lines[s.line] = s.text
         self.crow, self.ccol = s.crow, s.ccol
     else
-        other[#other+1] = { lines = copy_arr(self.lines), crow = self.crow, ccol = self.ccol }
+        other[#other+1] = { lines = Text.copy_arr(self.lines), crow = self.crow, ccol = self.ccol }
         self.lines, self.crow, self.ccol = s.lines, s.crow, s.ccol
     end
     self._burst = nil
@@ -3865,7 +3497,6 @@ function MDEdit:arrow(drow, dcol, m)  -- arrow key with optional Shift (select) 
     if word_key_mod(m) and dcol ~= 0 then if dcol < 0 then self:wordLeft(selecting) else self:wordRight(selecting) end
     else self:moveCursor(drow, dcol, { selection = selecting }) end
 end
-local md_split_line_prefix
 function MDEdit:insertTypedText(s)
     if not s or s == "" then return end
     self:pauseCaretBlinkForInput()
@@ -3959,8 +3590,13 @@ function MDEdit:newline()
     local l = self.lines[self.crow]
     local before, after = l:sub(1, self.ccol), l:sub(self.ccol+1)
     local prefix = ""
-    if md_split_line_prefix then
-        local indent, kind, marker, task, body = md_split_line_prefix(before)
+    -- md_split_line_prefix now lives in minfolio_md.lua and is always present (this was
+    -- previously a nil-tolerant guard on a forward-declared local that could, in principle,
+    -- never get assigned; PLAN.md §4/§6.3 calls this out as the most dangerous symbol in the
+    -- file for exactly that reason). MD is a `require`d module, not an optional upvalue, so
+    -- the guard is now dead weight and the call is unconditional.
+    do
+        local indent, kind, marker, task, body = MD.md_split_line_prefix(before)
         if (kind or task) and body == "" and after == "" then
             self.lines[self.crow] = indent
             self.ccol = #indent
@@ -3987,7 +3623,7 @@ function MDEdit:delChar()
     self:edit("del")
     if self.ccol > 0 then
         local l = self.lines[self.crow]
-        local prev = utf8_left(l, self.ccol)          -- delete the whole UTF-8 char to the left
+        local prev = Text.utf8_left(l, self.ccol)          -- delete the whole UTF-8 char to the left
         self.lines[self.crow] = l:sub(1, prev) .. l:sub(self.ccol+1)
         self.ccol = prev
         local incremental = self:updateVisualLine(self.crow)
@@ -4006,11 +3642,11 @@ function MDEdit:moveCursor(drow, dcol, opts)
     if dcol < 0 then
         if self.ccol <= 0 then
             if self.crow > 1 then self.crow = self.crow - 1; self.ccol = #self.lines[self.crow] end
-        else self.ccol = utf8_left(self.lines[self.crow], self.ccol) end
+        else self.ccol = Text.utf8_left(self.lines[self.crow], self.ccol) end
     elseif dcol > 0 then
         if self.ccol >= #self.lines[self.crow] then
             if self.crow < #self.lines then self.crow = self.crow + 1; self.ccol = 0 end
-        else self.ccol = utf8_right(self.lines[self.crow], self.ccol) end
+        else self.ccol = Text.utf8_right(self.lines[self.crow], self.ccol) end
     end
     if drow ~= 0 then
         if not self:moveCursorVisual(drow) then
@@ -4044,18 +3680,18 @@ function MDEdit:delWord()
     if self.ccol <= 0 then return self:delChar() end
     self:snapshot(); self._burst = nil
     local l = self.lines[self.crow]
-    local before = l:sub(1, prev_word_col(l, self.ccol))
+    local before = l:sub(1, Text.prev_word_col(l, self.ccol))
     self.lines[self.crow] = before .. l:sub(self.ccol+1); self.ccol = #before; self:refresh{ precise_edit = true }
 end
 function MDEdit:wordLeft(selecting)
     self._burst = nil
     self._desired_x = nil
-    self.ccol = prev_word_col(self.lines[self.crow], self.ccol); self:refresh{ layout_dirty = false, selection = selecting, cursor_move = true }
+    self.ccol = Text.prev_word_col(self.lines[self.crow], self.ccol); self:refresh{ layout_dirty = false, selection = selecting, cursor_move = true }
 end
 function MDEdit:wordRight(selecting)
     self._burst = nil
     self._desired_x = nil
-    self.ccol = next_word_col(self.lines[self.crow], self.ccol); self:refresh{ layout_dirty = false, selection = selecting, cursor_move = true }
+    self.ccol = Text.next_word_col(self.lines[self.crow], self.ccol); self:refresh{ layout_dirty = false, selection = selecting, cursor_move = true }
 end
 function MDEdit:scrollBy(lines)
     local old = self.vtop or 1
@@ -4119,7 +3755,7 @@ function MDEdit:outlineItems()
         if hashes then
             local level = #hashes
             local indent = string.rep("  ", math.max(0, level - 1))
-            local label = md_trim(text)
+            local label = MD.md_trim(text)
             if label ~= "" then
                 items[#items+1] = {
                     text = string.format("%s%s", indent, label),
@@ -4574,7 +4210,7 @@ function MDEdit:onKeyPress(key)
         self:flushTypeBuffer()
         if keymod(m, "Shift") then self:indentLine(-1)
         else
-            local _, kind, _, task = md_split_line_prefix(self.lines[self.crow])
+            local _, kind, _, task = MD.md_split_line_prefix(self.lines[self.crow])
             if kind or task then self:indentLine(1) else self:addChars("  ") end
         end
     elseif name == "Home" then self:flushTypeBuffer(); self:goToStartOfLine()
@@ -4679,23 +4315,10 @@ function MDEdit:fmtWrap(mk)          -- wrap selection (or the cursor) in marker
     self.lines[self.crow] = l:sub(1, self.ccol) .. mk .. mk .. l:sub(self.ccol+1)
     self.ccol = self.ccol + #mk; self:refresh()
 end
-md_split_line_prefix = function(line)
-    local indent, rest = line:match("^(%s*)(.*)$")
-    local marker, body = rest:match("^([%-%*%+]%s+)(.*)$")
-    local kind = marker and "bullet" or nil
-    if not marker then
-        marker, body = rest:match("^(%d+%.%s+)(.*)$")
-        kind = marker and "ordered" or nil
-    end
-    body = body or rest
-    local task, task_body = body:match("^(%[[ xX]%]%s+)(.*)$")
-    if task then body = task_body end
-    return indent or "", kind, marker, task, body
-end
 function MDEdit:setLinePrefix(kind, want_task)
     self:snapshot(); self._burst = nil
     local line = self.lines[self.crow]
-    local indent, old_kind, marker, task, body = md_split_line_prefix(line)
+    local indent, old_kind, marker, task, body = MD.md_split_line_prefix(line)
     local old_prefix = indent .. (marker or "") .. (task or "")
     local new_marker = marker or ""
     if kind == "bullet" then
@@ -4746,7 +4369,7 @@ function MDEdit:fmtHeader() self:fmtToggle("^(#+%s)", "# ") end
 function MDEdit:fmtList()   self:setLinePrefix("bullet") end
 function MDEdit:fmtOrdered() self:setLinePrefix("ordered") end
 function MDEdit:fmtTask()
-    local _, kind, _, task = md_split_line_prefix(self.lines[self.crow])
+    local _, kind, _, task = MD.md_split_line_prefix(self.lines[self.crow])
     if task then
         self:setLinePrefix(nil, false)
     else
@@ -5125,7 +4748,7 @@ function MDEdit:commitHighlightFromSelection()
     if not self:hasSel() then self.sel = nil; return self:refresh{ layout_dirty = false, selection = true } end
     local lr, lc, hr, hc = self:selRange()
     local function highlight_ranges(line, a, b)
-        local toks = md_tokenize(line)[1]
+        local toks = MD.md_tokenize(line)[1]
         local byte, ranges = 0, {}
         for _, span in ipairs(toks.spans or {}) do
             local raw = span.text or ""
@@ -5136,8 +4759,8 @@ function MDEdit:commitHighlightFromSelection()
                 if end_col > a and start_col < b then
                     local from = math.max(0, math.min(#raw, a - start_col))
                     local to = math.max(0, math.min(#raw, b - start_col))
-                    local lo = prev_word_col(raw, from)
-                    local hi = next_word_col(raw, to)
+                    local lo = Text.prev_word_col(raw, from)
+                    local hi = Text.next_word_col(raw, to)
                     if lo == hi and #raw > 0 then lo, hi = 0, #raw end
                     if hi == 0 and #raw > 0 then hi = #raw end
                     if hi > lo then ranges[#ranges+1] = { start_col + lo, start_col + hi } end
@@ -5303,7 +4926,7 @@ local function remove_tree(path)
     if mode ~= "directory" then return false end
     for name in lfs.dir(path) do
         if name ~= "." and name ~= ".." then
-            if not remove_tree(path_join(path, name)) then return false end
+            if not remove_tree(Text.path_join(path, name)) then return false end
         end
     end
     return lfs.rmdir(path)
@@ -5314,7 +4937,7 @@ local function dir_entries(dir)
     local ok = pcall(function()
         for name in lfs.dir(dir) do
             if name ~= "." and name ~= ".." and not name:match("^%.") then
-                local path = path_join(dir, name)
+                local path = Text.path_join(dir, name)
                 local mode = lfs.attributes(path, "mode")
                 if mode == "directory" then
                     dirs[#dirs+1] = name
@@ -5337,7 +4960,7 @@ open_markdown_picker = function(start_dir)
     local dirs, all_files, ok = dir_entries(dir)
     local files = {}
     for _, name in ipairs(all_files) do
-        if is_markdown_file(name) then files[#files+1] = name end
+        if Text.is_markdown_file(name) then files[#files+1] = name end
     end
 
     local items = {}
@@ -5346,10 +4969,10 @@ open_markdown_picker = function(start_dir)
         items[#items+1] = { text = _("Minfolio folder"), kind = "dir", path = NOTES_DIR }
     end
     for _, name in ipairs(dirs) do
-        items[#items+1] = { text = name .. "/", kind = "dir", path = path_join(dir, name) }
+        items[#items+1] = { text = name .. "/", kind = "dir", path = Text.path_join(dir, name) }
     end
     for _, name in ipairs(files) do
-        items[#items+1] = { text = name, kind = "file", path = path_join(dir, name) }
+        items[#items+1] = { text = name, kind = "file", path = Text.path_join(dir, name) }
     end
     if #items == 0 or not ok then
         items[#items+1] = { text = ok and _("No Markdown files here") or _("Cannot read this folder"), kind = "noop" }
@@ -5357,7 +4980,7 @@ open_markdown_picker = function(start_dir)
 
     local menu
     menu = Menu:new{
-        title = _("Open .md") .. " - " .. (path_base(dir) ~= "" and dir or "/"),
+        title = _("Open .md") .. " - " .. (Text.path_base(dir) ~= "" and dir or "/"),
         item_table = items,
         is_popout = false,
         onMenuSelect = function(_self, item)
@@ -5409,7 +5032,7 @@ local function show_new_entry_dialog(menu, dir, kind)
                 local name = clean_entry_name(dlg:getInputText(), not is_folder)
                 UIManager:close(dlg)
                 if not name then notify(_("Invalid name")); return end
-                local path = path_join(dir, name)
+                local path = Text.path_join(dir, name)
                 if lfs.attributes(path, "mode") then notify(_("Name already exists")); return end
                 if is_folder then
                     if ensure_dir(path) then
@@ -5441,11 +5064,11 @@ local function show_rename_dialog(parent_menu, dir, item)
         buttons = {{
             { text = _("Cancel"), callback = function() UIManager:close(dlg) end },
             { text = _("Rename"), is_enter_default = true, callback = function()
-                local name = clean_entry_name(dlg:getInputText(), item.kind == "file" and is_markdown_file(item.name))
+                local name = clean_entry_name(dlg:getInputText(), item.kind == "file" and Text.is_markdown_file(item.name))
                 UIManager:close(dlg)
                 if not name then notify(_("Invalid name")); return end
                 if name == item.name then return end
-                local dest = path_join(dir, name)
+                local dest = Text.path_join(dir, name)
                 if lfs.attributes(dest, "mode") then notify(_("Name already exists")); return end
                 if os.rename(item.path, dest) then
                     refresh_file_manager(parent_menu, dir)
@@ -5487,7 +5110,7 @@ local function show_item_actions(parent_menu, dir, item)
     if item.kind == "dir" then
         buttons[#buttons+1] = {{ text = _("Open folder"),
             callback = act(function() refresh_file_manager(parent_menu, item.path) end) }}
-    elseif is_markdown_file(item.name) then
+    elseif Text.is_markdown_file(item.name) then
         buttons[#buttons+1] = {{ text = _("Open"), callback = act(function()
             if parent_menu then UIManager:close(parent_menu) end
             edit_note(item.path)
@@ -5521,12 +5144,12 @@ show_file_manager = function(start_dir)
     }
     if dir ~= NOTES_DIR then items[#items+1] = { text = "../", kind = "dir_nav", path = path_parent(dir) } end
     for _, name in ipairs(dirs) do
-        local item = { text = name .. "/", kind = "dir", name = name, path = path_join(dir, name) }
+        local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(dir, name) }
         item.hold_callback = function() show_item_actions(menu, dir, item) end
         items[#items+1] = item
     end
     for _, name in ipairs(files) do
-        local item = { text = name, kind = "file", name = name, path = path_join(dir, name) }
+        local item = { text = name, kind = "file", name = name, path = Text.path_join(dir, name) }
         item.hold_callback = function() show_item_actions(menu, dir, item) end
         items[#items+1] = item
     end
@@ -5535,7 +5158,7 @@ show_file_manager = function(start_dir)
     -- Custom title bar so we can show a Kindle-style battery indicator to the left
     -- of the close (X) icon. TitleBar only exposes a single right icon (the close
     -- button), so the battery is added as an extra right-aligned overlap child.
-    local title_text = _("Minfolio") .. " - " .. (dir == NOTES_DIR and path_base(NOTES_DIR) or dir)
+    local title_text = _("Minfolio") .. " - " .. (dir == NOTES_DIR and Text.path_base(NOTES_DIR) or dir)
     local batt_info = battery_info()
     -- TitleBar knows about its close icon but not the extra battery widget we
     -- overlay on the right. Reserve that whole region in its title layout so a
@@ -5581,7 +5204,7 @@ show_file_manager = function(start_dir)
             elseif item.kind == "dir_nav" then refresh_file_manager(menu, item.path)
             elseif item.kind == "dir" then refresh_file_manager(menu, item.path)
             elseif item.kind == "file" then
-                if is_markdown_file(item.name) then UIManager:close(menu); edit_note(item.path) else show_item_actions(menu, dir, item) end
+                if Text.is_markdown_file(item.name) then UIManager:close(menu); edit_note(item.path) else show_item_actions(menu, dir, item) end
             end
         end,
         onMenuHold = function(_self, item)
@@ -5605,18 +5228,18 @@ show_file_manager = function(start_dir)
         }
         if next_dir ~= NOTES_DIR then next_items[#next_items+1] = { text = "../", kind = "dir_nav", path = path_parent(next_dir) } end
         for _, name in ipairs(next_dirs) do
-            local item = { text = name .. "/", kind = "dir", name = name, path = path_join(next_dir, name) }
+            local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(next_dir, name) }
             item.hold_callback = function() show_item_actions(self, next_dir, item) end
             next_items[#next_items+1] = item
         end
         for _, name in ipairs(next_files) do
-            local item = { text = name, kind = "file", name = name, path = path_join(next_dir, name) }
+            local item = { text = name, kind = "file", name = name, path = Text.path_join(next_dir, name) }
             item.hold_callback = function() show_item_actions(self, next_dir, item) end
             next_items[#next_items+1] = item
         end
         if not readable then next_items[#next_items+1] = { text = _("Cannot read this folder"), kind = "noop" } end
         self._minfolio_dir = next_dir
-        local next_title = _("Minfolio") .. " - " .. (next_dir == NOTES_DIR and path_base(NOTES_DIR) or next_dir)
+        local next_title = _("Minfolio") .. " - " .. (next_dir == NOTES_DIR and Text.path_base(NOTES_DIR) or next_dir)
         self:switchItemTable(next_title, next_items)
         logger.info("minfolio file manager navigated:", next_dir)
     end
