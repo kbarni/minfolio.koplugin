@@ -15,7 +15,7 @@
 -- all 58 MDEDIT_*/MINDMAP_* constants that lived in the single load-time block,
 -- returned here as `{ EDIT = {...}, MAP = {...} }`.
 --
--- The EDIT/MAP split is not clean (PLAN.md §4/§11, INVENTORY.md §7):
+-- The EDIT/MAP split is not clean (PLAN.md §4/§11):
 -- MINDMAP_TOPBAR_TOP_PAD is defined as MDEDIT_PAD (a definition-time
 -- cross-reference, resolved below by reading EDIT.MDEDIT_PAD while building MAP),
 -- and mindmap code elsewhere in main.lua reads MDEDIT_MENU_W, MDEDIT_TITLE_ACTION_GAP,
@@ -24,8 +24,7 @@
 --
 -- Deliberately EXCLUDES MDEDIT_TABLE_PAD_X/MDEDIT_TABLE_PAD_Y: despite the
 -- MDEDIT_ prefix, they live outside this constant block in main.lua and are
--- grouped with the render-facing minfolio_style.lua module instead (PLAN.md §4,
--- INVENTORY.md §7).
+-- grouped with the render-facing minfolio_style.lua module instead (PLAN.md §4).
 --
 -- Required by callers as `local C = require("minfolio_const")`.
 

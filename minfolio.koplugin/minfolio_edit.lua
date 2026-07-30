@@ -14,12 +14,12 @@
 -- md_clipboard is a file-local here, deliberately shared across editor
 -- instances (opening a second note after copying text in the first must
 -- still be able to paste it) -- all its uses (copy/cut/paste) are in this
--- file's text-ops group, per PLAN.md §4/§6.4 and INVENTORY.md §3.
+-- file's text-ops group, per PLAN.md §4/§6.4.
 --
 -- Ported verbatim from minfolio.koplugin/main.lua (PLAN.md §5 Tier 4, §10
 -- step 8): the MDEdit class and all of its methods not assigned to one of
--- the three mixin modules above (see INVENTORY.md §1 for the full
--- per-method assignment map).
+-- the three mixin modules above (see ARCHITECTURE.md for how to locate any
+-- given method across the four files).
 --
 -- Required by callers as `local MDEdit = require("minfolio_edit")`.
 

@@ -28,8 +28,9 @@
 -- minfolio_edit.lua). Call sites there use `Layout.freeWrapEntry(entry)`.
 --
 -- Ported verbatim from main.lua / minfolio_edit.lua (PLAN.md §5 Tier 4, §10
--- step 8): the 18 methods and the free_wrap_entry helper assigned to this
--- module by INVENTORY.md §1's method map. Method bodies are unedited; only
+-- step 8): the 18 layout methods (wrapping, visual rows, measurement caches)
+-- plus the free_wrap_entry helper. ARCHITECTURE.md explains how to locate any
+-- MDEdit method across the four files. Method bodies are unedited; only
 -- each declaration line's receiver (`MDEdit` -> the local proxy of the same
 -- name) and the free_wrap_entry call sites in minfolio_edit.lua changed.
 --

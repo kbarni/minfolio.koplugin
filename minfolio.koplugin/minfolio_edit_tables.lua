@@ -15,8 +15,9 @@
 -- unlike minfolio_edit_layout there is no `fns` table to export.
 --
 -- Ported verbatim from main.lua / minfolio_edit.lua (PLAN.md §5 Tier 4, §10
--- step 8): the 11 methods assigned to this module by INVENTORY.md §1's
--- method map. Method bodies are unedited; only each declaration line's
+-- step 8): the 11 methods of the table subsystem, kept together as one unit.
+-- ARCHITECTURE.md explains how to locate any MDEdit method across the four
+-- files. Method bodies are unedited; only each declaration line's
 -- receiver (`MDEdit` -> the local proxy of the same name) changed.
 --
 -- Required by minfolio_edit.lua as `local Tables = require("minfolio_edit_tables")`.

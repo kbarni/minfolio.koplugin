@@ -22,7 +22,7 @@
 -- LUA_PATH) that nothing outside main.lua read it as a global.
 --
 -- HAZARD, and the one authorised non-verbatim change in this move (PLAN.md
--- §6.3/§11; INVENTORY.md §6 line 154): `.post` used to read `local sock =
+-- §6.3/§11): `.post` used to read `local sock =
 -- MinfolioRemote and MinfolioRemote.socket(cfg, 2)` -- a nil-tolerant guard
 -- on the MinfolioRemote GLOBAL, which only worked because a global read
 -- resolves at call time, 1,854 lines after `MinfolioRemote` was actually
@@ -33,7 +33,7 @@
 -- left as `MinfolioRemote and MinfolioRemote.socket(...)` against a name
 -- that no longer exists as a global at all post-refactor, it would silently
 -- and permanently read nil forever, and desktop pairing would stop posting
--- with no error anywhere (exactly the failure PLAN.md §11/INVENTORY.md §6
+-- with no error anywhere (exactly the failure PLAN.md §11
 -- warn about). `.post` below therefore calls `Remote.socket(...)` directly.
 --
 -- Required by callers as `local Pair = require("minfolio_pair")`.

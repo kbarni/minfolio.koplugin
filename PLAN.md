@@ -224,10 +224,12 @@ mid-refactor judgement. Unassigned families included all formatting
 assigned module, every cross-boundary plain helper, every forward declaration,
 every global, every computed constant. No extraction starts until it exists and is
 reviewed. Both reviewers independently identified this as the gap that made v1
-unexecutable. Delivered as `INVENTORY.md` (226 methods, 63 cross-boundary helpers,
-7 nil-tolerant guard sites, 22 module budget projections).
+unexecutable. It was delivered as a working inventory covering 226 methods, 63
+cross-boundary helpers, 7 nil-tolerant guard sites and per-module budget projections,
+and was retired once the split was complete: its line numbers were a pre-extraction
+snapshot, and `ARCHITECTURE.md` carries the parts that outlived it.
 
-**`INVENTORY.md`'s line numbers are a snapshot; its assignments are durable.** They
+**The inventory's line numbers were a snapshot; its assignments were durable.** They
 were derived against `main.lua` at 5,755 lines, before any extraction. The moment
 step 3 moves Tier 0 out, every subsequent line number shifts. Later steps must use
 the inventory for *what goes where* and re-derive line numbers from the current

@@ -12,7 +12,7 @@
 -- MD_FACES, md_face, md_color, MDEDIT_TABLE_PAD_X, MDEDIT_TABLE_PAD_Y.
 -- The last two carry the MDEDIT_ prefix but lived outside main.lua's main
 -- MDEDIT_*/MINDMAP_* constant block and are grouped here rather than in
--- minfolio_const.lua, matching PLAN.md §4/§11 and INVENTORY.md §7.
+-- minfolio_const.lua, matching PLAN.md §4/§11.
 --
 -- MD_LH was moved here and then DELETED: it had no call site anywhere, in
 -- main.lua or any module. Removed at the repo owner's request.

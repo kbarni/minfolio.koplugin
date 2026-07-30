@@ -2,7 +2,7 @@
 
 This is the map a new contributor needs. It describes the plugin as the code in
 `minfolio.koplugin/` actually is, at the end of the module-split refactor described in
-`PLAN.md` and detailed method-by-method in `INVENTORY.md`. Where this document and
+`PLAN.md`. Where this document and
 `PLAN.md` disagree, this document is right and the disagreement is called out explicitly —
 `PLAN.md` was a plan, revised twice, and reality drifted from it in a few places during
 execution. `PROTOCOL.md` covers the desktop pairing and document-sync wire protocol in
@@ -145,9 +145,8 @@ that starts padding a table with unrelated methods to dodge the local count, the
 is trending toward the ceiling, split it — table fields don't need to be method tables of a
 KOReader class; a plain returned module table (`local M = {}; function M.foo() ... end;
 return M`) already gets every function for free without spending a local, which is why none
-of the 21 modules today are anywhere close to 60, let alone 200 (see
-`INVENTORY.md §8`'s per-module projections, which this refactor's actual local counts
-confirm were accurate).
+of the 21 modules today are anywhere close to 60, let alone 200 -- the largest is
+`minfolio_browser.lua` at 37.
 
 ## The `minfolio_*` prefix rule and why
 
@@ -258,15 +257,13 @@ proxy table), so a single grep finds it in exactly one file:
 grep -n '^function MDEdit:methodName' minfolio.koplugin/minfolio_edit*.lua
 ```
 
-`INVENTORY.md §1` is the authoritative method → module assignment map for all 160 `MDEdit`
-methods (and `§2` for `MindmapView`/`MindmapCanvas`'s 66), with a one-line rationale for
-each. Its **line numbers are stale** — they were taken against the original 5,755-line
-`main.lua` before any extraction and were never meant to be carried forward — but its
-**module assignments remain current**; spot-checking several (`computeVisualRows` →
-`minfolio_edit_layout`, `checkRemoteInbox` → `minfolio_edit`) against the live files
-confirms this. If the grep above comes up empty, the method was renamed or removed since
-`INVENTORY.md` was written; if it finds two hits, that's the `rawget` assert's job to have
-already caught at load time.
+The grep above is the authoritative answer, because the method declarations are the only
+record that cannot drift. The four files divide the 160 methods as: `minfolio_edit_layout`
+18 (wrapping, visual rows, measurement), `minfolio_edit_tables` 11 (the table subsystem,
+deliberately kept whole), `minfolio_edit_view` 28 (rebuild, refresh, dirty regions, top
+bar), and `minfolio_edit` the remaining 103 (the class, text ops, undo, selection, find,
+gestures, lifecycle). If the grep comes up empty the method was renamed or removed; if it
+finds two hits, that is the `rawget` assert's job to have caught at load time.
 
 ## The controller (`minfolio_app`)
 
@@ -326,7 +323,7 @@ assumed.** It would be easy, while extending `minfolio_md.lua`, to reach for a K
 `require`-able under plain `luajit` and its test suite stops running, silently, the next
 time `scripts/deploy.sh` executes it (an `attempt to call a nil value` or similar from a
 missing `Font` global, not a clear "you broke the purity rule" message). The boundary that
-keeps this from happening is the one `PLAN.md §4`/`INVENTORY.md §7` already drew and the
+keeps this from happening is the one `PLAN.md §4` already drew and the
 current module split preserves exactly: `minfolio_md.lua` holds parsing
 (`md_inline`/`md_tokenize`/...) and `minfolio_style.lua` holds the render-facing half
 (`md_face`/`md_color`, which need `Font`/`Blitbuffer`) as a separate, KOReader-dependent

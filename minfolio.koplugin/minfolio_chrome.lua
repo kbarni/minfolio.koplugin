@@ -47,8 +47,8 @@
 --
 -- status_date_text, status_time_text and battery_status_text were moved here
 -- and then DELETED: they had zero call sites anywhere, confirmed three times
--- (INVENTORY.md's step-0 sweep, this package's re-check, and a final sweep
--- across every module before removal). Removed at the repo owner's request
+-- (an initial pre-refactor sweep, a re-check during the move, and a final
+-- sweep across every module before removal). Removed at the repo owner's request
 -- rather than carried, per this work
 -- package's behaviour-preserving mandate; deleting them is a separate decision
 -- for the repo owner.
