@@ -73,6 +73,11 @@ function Minfolio:pollLaunchFlag()
         os.remove(LAUNCH_FLAG)
         self:openLaunchTarget(target)
     end
+    -- Piggybacks on this tick rather than adding a second timer: it is a no-op
+    -- unless Minfolio rotated the screen and every Minfolio screen has since
+    -- closed, and being poll-driven means it covers exit paths no close handler
+    -- of ours runs for. See minfolio_chrome.restore_rotation_if_idle.
+    Chrome.restore_rotation_if_idle()
     UIManager:scheduleIn(0.5, function() self:pollLaunchFlag() end)
 end
 
@@ -101,6 +106,10 @@ end
 -- armed, so this is safe to call unconditionally on every teardown.
 function Minfolio:onCloseWidget()
     Pair.disarm()
+    -- Unconditional, unlike the poll's idle-gated form: KOReader is going away,
+    -- so there is no Minfolio screen left to wait for, and a rotation left in
+    -- place here would be the orientation the next launch starts in.
+    Chrome.restore_rotation()
 end
 
 function Minfolio:onDispatcherRegisterActions()
@@ -130,7 +139,7 @@ function Minfolio:onMinfolioOpen() Browser.open_notes(); return true end
 function Minfolio:addToMainMenu(menu_items)
     menu_items.minfolio = {
         text = _("Minfolio"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         callback = function() Browser.open_notes() end,
     }
     -- A separate top-level entry (following kshell.koplugin's own precedent

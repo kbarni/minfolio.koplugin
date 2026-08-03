@@ -53,6 +53,12 @@
 -- package's behaviour-preserving mandate; deleting them is a separate decision
 -- for the repo owner.
 --
+-- Added later (not part of the original port): `saved_rotation` plus
+-- `restore_rotation`/`restore_rotation_if_idle`, which give the screen back to
+-- KOReader in the orientation it had before Minfolio rotated it. See their
+-- comments at the bottom of this file for why leaving it rotated is not an
+-- option.
+--
 -- Required by callers as `local Chrome = require("minfolio_chrome")`.
 
 local Device = require("device")
@@ -188,8 +194,13 @@ end
 -- Rotates the whole device screen 90° counter-clockwise (repeat to cycle through
 -- upright / sideways / upside-down / sideways-the-other-way, same 4 modes KOReader
 -- itself uses for its own rotation).
+-- The rotation KOReader was in before Minfolio first turned the screen, kept so
+-- it can be handed back on the way out (see restore_rotation below). nil means
+-- Minfolio has not rotated anything, so there is nothing owed.
+M.saved_rotation = nil
 function M.rotate_screen_ccw()
     local mode = Screen:getRotationMode()
+    if M.saved_rotation == nil then M.saved_rotation = mode end
     Screen:setRotationMode((mode - 1) % 4)
     -- Every full-screen widget we show (the file listing, the editor, any
     -- popout) is sized from Screen:getWidth()/getHeight() at construction
@@ -198,7 +209,71 @@ function M.rotate_screen_ccw()
     -- every widget in the stack (including ones sitting hidden underneath
     -- another, e.g. the file list behind an open note), not just the one on
     -- top, so nothing is left showing a layout built for the old dimensions.
-    UIManager:broadcastEvent(require("ui/event"):new("ScreenResize"))
+    --
+    -- The new screen dimen is a REQUIRED argument, not decoration: KOReader's
+    -- own InputContainer:onScreenResize hands it straight to
+    -- updateTouchZonesOnScreenResize, which indexes it for .w/.h. Broadcasting
+    -- without it crashed the reader (`attempt to index local
+    -- 'new_screen_dimen' (a nil value)`) as soon as the event reached any
+    -- widget that had not overridden onScreenResize -- Minfolio's own widgets
+    -- ignore the argument, so the omission was invisible until the broadcast
+    -- reached ReaderUI. setRotationMode above has already flipped the screen,
+    -- so getSize() here is the post-rotation size, which is what every
+    -- receiver needs.
+    UIManager:broadcastEvent(require("ui/event"):new("ScreenResize", Screen:getSize()))
+end
+
+-- True while any Minfolio-owned full-screen widget is still on UIManager's
+-- window stack. The editor and the mindmap carry `minfolio_screen` on their
+-- class table (so every instance has it); the browser's listings set it on the
+-- Menu instance. Dialogs shown *over* one of those do not need marking -- the
+-- screen underneath is still stacked, which is exactly what this asks about.
+local function minfolio_screen_shown()
+    for widget in UIManager:topdown_widgets_iter() do
+        if widget and widget.minfolio_screen then return true end
+    end
+    return false
+end
+
+-- Hands the screen back to whatever rotation KOReader was in before Minfolio
+-- rotated it. This matters because KOReader does not re-flow for a bare
+-- ScreenResize: ReaderUI:onScreenResize only updates touch zones, and a real
+-- re-layout happens only in its own SetRotationMode path (frontend/apps/reader/
+-- modules/readerview.lua). So a Minfolio session that exits sideways leaves the
+-- reader painted at dimensions it never rebuilt for. Restoring the original
+-- rotation sidesteps that entirely -- the widgets underneath are correct for
+-- this orientation again, they only need repainting.
+function M.restore_rotation()
+    local target = M.saved_rotation
+    if target == nil then return end
+    M.saved_rotation = nil
+    if Screen:getRotationMode() == target then return end
+    Screen:setRotationMode(target)
+    UIManager:broadcastEvent(require("ui/event"):new("ScreenResize", Screen:getSize()))
+    UIManager:setDirty("all", "full")
+end
+
+-- Watchdog form of the above, driven by main.lua's launch-flag poll (0.5s), so
+-- it covers every way a Minfolio screen can go away -- including the ones no
+-- close handler of ours runs for -- with one call site.
+--
+-- It waits for the stack to stay clear of Minfolio for a few consecutive polls
+-- because closing one Minfolio screen to open another is not always atomic:
+-- the controls menu defers its callback by 0.01s and the launch flag by 0.1s,
+-- so mid-transition the stack is briefly empty. Restoring there would rotate
+-- the screen out from under the screen that is about to open.
+M._rotation_idle_polls = 0
+function M.restore_rotation_if_idle()
+    if M.saved_rotation == nil then return end
+    if minfolio_screen_shown() then
+        M._rotation_idle_polls = 0
+        return
+    end
+    M._rotation_idle_polls = M._rotation_idle_polls + 1
+    if M._rotation_idle_polls < 3 then return end
+    M._rotation_idle_polls = 0
+    M.trace("rotation-restore", "mode=", tostring(M.saved_rotation))
+    M.restore_rotation()
 end
 
 return M

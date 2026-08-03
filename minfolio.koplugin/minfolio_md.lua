@@ -85,7 +85,13 @@ function M.md_tokenize(textstr)
             local pre, rest = line:match("^(%s*[%-%*%+]%s+)(.*)$")
             local ordered = false
             if not pre then
-                pre, rest = line:match("^(%s*%d+%.%s+)(.*)$")
+                -- "1)" is an ordered-list delimiter in CommonMark exactly like
+                -- "1.", and parse_mindmap/lineKind already accepted both -- so a
+                -- "1)" list showed up as list nodes in the mindmap while this
+                -- tokenizer rendered the same lines as plain paragraphs, and
+                -- md_split_line_prefix (below) gave them no continuation on
+                -- Enter. One document, two disagreeing readings of it.
+                pre, rest = line:match("^(%s*%d+[%.%)]%s+)(.*)$")
                 ordered = pre ~= nil
             end
             if pre then
@@ -246,7 +252,8 @@ function M.md_split_line_prefix(line)
     local marker, body = rest:match("^([%-%*%+]%s+)(.*)$")
     local kind = marker and "bullet" or nil
     if not marker then
-        marker, body = rest:match("^(%d+%.%s+)(.*)$")
+        -- Both CommonMark delimiters; see md_tokenize's note above.
+        marker, body = rest:match("^(%d+[%.%)]%s+)(.*)$")
         kind = marker and "ordered" or nil
     end
     body = body or rest

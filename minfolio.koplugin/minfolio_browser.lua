@@ -207,6 +207,9 @@ open_markdown_picker = function(start_dir)
         title = _("Open .md") .. " - " .. (Text.path_base(dir) ~= "" and dir or "/"),
         item_table = items,
         is_popout = false,
+        -- One of Minfolio's own screens; minfolio_chrome looks for this field on
+        -- UIManager's window stack before giving the rotation back to KOReader.
+        minfolio_screen = true,
         onMenuSelect = function(_self, item)
             if item.kind == "dir" then
                 UIManager:close(menu)
@@ -422,6 +425,9 @@ show_file_manager = function(start_dir)
         is_popout = false,
         handle_hold_on_hold_release = true,
         custom_title_bar = title_bar,
+        -- See the picker's Menu above: marks this as a Minfolio screen for
+        -- minfolio_chrome's rotation hand-back.
+        minfolio_screen = true,
         onMenuSelect = function(_self, item)
             local current_dir = _self._minfolio_dir or dir
             -- The editor is fullscreen and returns here via its on_close, so close

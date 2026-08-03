@@ -63,7 +63,12 @@ local free_wrap_entry = require("minfolio_edit_layout").fns.freeWrapEntry
 assert(free_wrap_entry, "minfolio_edit_layout.fns.freeWrapEntry missing")
 
 local md_clipboard = ""               -- shared across notes
-local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true }
+-- `minfolio_screen` marks this as one of Minfolio's own full-screen views:
+-- minfolio_chrome scans UIManager's window stack for that field to tell whether
+-- the app still has a screen up, and hands the device's rotation back to
+-- KOReader once none is left.
+local MDEdit = InputContainer:extend{ path = nil, remote = nil, on_close = nil, is_always_active = true,
+    minfolio_screen = true }
 function MDEdit:init()
     Keys.install_keyboard_aliases()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
@@ -607,7 +612,12 @@ function MDEdit:newline()
         end
         if kind == "ordered" then
             local n = tonumber((marker or ""):match("^(%d+)")) or 1
-            prefix = indent .. tostring(n + 1) .. ". "
+            -- Carry the source line's own delimiter instead of hardcoding ".",
+            -- now that md_split_line_prefix recognises "1)" as ordered too:
+            -- continuing "1) first" used to hand back "2. ", switching delimiter
+            -- mid-list on the user.
+            local delim = (marker or ""):match("^%d+([%.%)])") or "."
+            prefix = indent .. tostring(n + 1) .. delim .. " "
         elseif kind == "bullet" then
             prefix = indent .. (marker or "- ")
         elseif task then
@@ -667,6 +677,18 @@ function MDEdit:leftChar()  self.sel = nil; self:moveCursor(0, -1) end
 function MDEdit:rightChar() self.sel = nil; self:moveCursor(0, 1) end
 function MDEdit:upLine()    self.sel = nil; self:moveCursor(-1, 0) end
 function MDEdit:downLine()  self.sel = nil; self:moveCursor(1, 0) end
+-- VirtualKeyboard's inputbox contract, not optional extras: holding the on-screen
+-- ↑/↓ key calls keyboard:scrollUp()/scrollDown(), which forward to
+-- self.inputbox:scrollUp()/scrollDown() UNGUARDED (frontend/ui/widget/
+-- virtualkeyboard.lua -- unlike onSwitchingKeyboardLayout, which that file does
+-- guard with an `if`). Nothing in MDEdit's base chain (InputContainer →
+-- WidgetContainer → Widget → EventListener) defines them, so their absence was a
+-- hard crash on hold-↑: "attempt to call method 'scrollUp' (a nil value)".
+-- MindmapView already carried both as no-op stubs; the editor has real paging, so
+-- page granularity is used here to match KOReader's own semantics (InputText
+-- delegates to TextBoxWidget:scrollUp, which moves by lines_per_page, not one line).
+function MDEdit:scrollUp()   self:pageUp() end
+function MDEdit:scrollDown() self:pageDown() end
 function MDEdit:goToStartOfLine() self._desired_x = nil; self.ccol = 0; self:refresh{ layout_dirty = false, cursor_move = true } end
 function MDEdit:goToEndOfLine()   self._desired_x = nil; self.ccol = #self.lines[self.crow]; self:refresh{ layout_dirty = false, cursor_move = true } end
 function MDEdit:delToStartOfLine()
@@ -1023,23 +1045,41 @@ function MDEdit:isKeyboardHideGesture(ges)
     local downward = dy >= C.EDIT.MDEDIT_KEYBOARD_SWIPE_DY and math.abs(dy) >= math.abs(dx) * 1.25
     return near_kbd_top and downward
 end
+-- Writes through IO.write_file_atomic, and -- the part that matters -- only
+-- clears self._dirty when the write actually reported success. The previous
+-- version opened the path with "w" (truncating the note immediately), ignored
+-- what write/close returned, and cleared _dirty unconditionally, so a failed
+-- save left a truncated file that the editor believed was safely on disk. From
+-- there the in-memory text was one close away from being gone for good. Keeping
+-- _dirty true instead means the buffer is intact, autosave keeps retrying, and
+-- onCloseWidget's flush still has something to flush.
 function MDEdit:save()
     self:flushTypeBuffer()
     local text = self:currentText()
-    local out = io.open(self.path, "w")
-    if out then
-        out:write(text)
-        out:close()
-        self._dirty = false
-        self._file_text = text
-        self._file_signature = IO.file_signature(self.path)
-        if self.remote then IO.write_file(self.remote.outbox_path, text) end
-        self._external_change_prompted = nil
-        self._autosave_paused_for_external = nil
-        if self._autosave_pending then UIManager:unschedule(self._autosave_pending); self._autosave_pending = nil end
-        return true
+    local ok, err = IO.write_file_atomic(self.path, text)
+    if not ok then
+        -- Notify on the ok->failing edge only. Autosave retries on a timer, so
+        -- notifying every attempt would bury the screen in identical toasts
+        -- while the volume is unmounted -- which is exactly when the user needs
+        -- to be able to read one.
+        Chrome.trace("editor-save-failed", "path=", tostring(self.path), "err=", tostring(err))
+        if not self._save_failed then
+            self._save_failed = true
+            Chrome.notify(_("Could not save: ") .. tostring(err or "unknown error"))
+        end
+        return false
     end
-    return false
+    self._save_failed = nil
+    self._dirty = false
+    self._file_text = text
+    self._file_signature = IO.file_signature(self.path)
+    -- The worker polls this file and uploads whatever it finds, so a torn read
+    -- here would ship a truncated document to the desktop.
+    if self.remote then IO.write_file_atomic(self.remote.outbox_path, text) end
+    self._external_change_prompted = nil
+    self._autosave_paused_for_external = nil
+    if self._autosave_pending then UIManager:unschedule(self._autosave_pending); self._autosave_pending = nil end
+    return true
 end
 -- Handles both the app's own Rotate screen action and any generic resize;
 -- Chrome.rotate_screen_ccw() has already applied Screen:setRotationMode by the time

@@ -141,6 +141,29 @@ do
     check("ordered: multi-digit marker parses", lines[1].block == "bullet" and lines[1].spans[1].display == "12. ")
 end
 
+-- Regression: "1)" is an ordered-list delimiter in CommonMark exactly like "1.".
+-- md_tokenize used to accept only "%d+%.", while parse_mindmap and
+-- MindmapView:lineKind both accepted "%d+[.)]" -- so the same document read as a
+-- list in the mindmap and as plain paragraphs in the editor.
+do
+    local lines = MD.md_tokenize("1) first item")
+    check("ordered: ')' delimiter is a list, not a paragraph", lines[1].block == "bullet")
+    check("ordered: ')' marker display keeps its own delimiter", lines[1].spans[1].display == "1) ")
+end
+
+do
+    local lines = MD.md_tokenize("  2) indented")
+    check("ordered: ')' marker parses with leading indent", lines[1].block == "bullet")
+    check("ordered: ')' indent is retained for layout", lines[1].indent_ws == "  ")
+end
+
+-- A bare number must NOT become a list: "1.5 metres" and "2024" are prose.
+do
+    check("ordered: number without a delimiter+space stays normal",
+        MD.md_tokenize("1.5 metres")[1].block == "normal")
+    check("ordered: bare number stays normal", MD.md_tokenize("2024")[1].block == "normal")
+end
+
 do
     local lines = MD.md_tokenize("- [ ] unchecked task")
     check("task (unchecked): block is 'bullet'", lines[1].block == "bullet")
@@ -311,6 +334,16 @@ do
     check("split_line_prefix: digit+dot recognized as kind 'ordered'", kind == "ordered")
     check("split_line_prefix: ordered marker captured verbatim", marker == "3. ")
     check("split_line_prefix: ordered body is the text after the marker", body == "ordered text")
+end
+
+-- The marker is captured verbatim (delimiter included) because MDEdit:newline
+-- builds the next item's prefix from it: hardcoding "." there turned "1) first"
+-- into "2. " on Enter, switching delimiter mid-list.
+do
+    local _, kind, marker, _, body = MD.md_split_line_prefix("3) ordered text")
+    check("split_line_prefix: digit+paren recognized as kind 'ordered'", kind == "ordered")
+    check("split_line_prefix: ')' marker captured verbatim", marker == "3) ")
+    check("split_line_prefix: ')' body is the text after the marker", body == "ordered text")
 end
 
 do

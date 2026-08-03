@@ -73,7 +73,11 @@ local Keys = require("minfolio_keys")
 local Chrome = require("minfolio_chrome")
 local MindmapCanvas = require("minfolio_map_canvas")
 
-local MindmapView = InputContainer:extend{ editor = nil, is_always_active = true, disable_double_tap = true }
+-- `minfolio_screen`: see the same field on MDEdit -- it is how minfolio_chrome
+-- recognises a Minfolio view on UIManager's window stack when deciding whether
+-- the screen rotation is still owed back to KOReader.
+local MindmapView = InputContainer:extend{ editor = nil, is_always_active = true, disable_double_tap = true,
+    minfolio_screen = true }
 function MindmapView:init()
     self.fw, self.fh = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh }
@@ -597,6 +601,26 @@ function MindmapView:lineKind(line)
     return "paragraph", 0
 end
 
+-- True when every heading in [first, finish] can take one more '#'.
+--
+-- reattach() already refuses to deepen the *selected* node past level 6, but the
+-- range it hands to adjustRangeDepth is the node AND its whole subtree, and a
+-- descendant is always deeper than its parent. So indenting a level-4 heading
+-- whose child sits at 6 passed the guard and pushed that child to "#######" --
+-- seven hashes is not a heading in Markdown (MD.heading caps at 6 and returns
+-- nil), so the child silently stopped being a node: gone from the mindmap and
+-- from the editor's Outline, still styled as a heading by md_tokenize, which
+-- does not enforce the cap. Checked as a whole-range precondition rather than
+-- skipped per line, because a structural move that applies to some of a subtree
+-- and not the rest leaves the document in a shape the user never asked for.
+function MindmapView:rangeCanDeepen(lines, first, finish)
+    for i = first, finish do
+        local kind, level = self:lineKind(lines[i] or "")
+        if kind == "heading" and (level or 0) >= 6 then return false end
+    end
+    return true
+end
+
 function MindmapView:adjustRangeDepth(lines, first, finish, dir)
     for i = first, finish do
         local line = lines[i] or ""
@@ -694,6 +718,9 @@ function MindmapView:reattach(dir)
         return Chrome.notify(_("Cannot outdent this node"))
     end
     if dir > 0 and kind == "heading" and level >= 6 then return Chrome.notify(_("Heading is already deepest")) end
+    if dir > 0 and not self:rangeCanDeepen(lines, first, finish) then
+        return Chrome.notify(_("A heading below this one is already deepest"))
+    end
     self:snapshot()
     self:adjustRangeDepth(lines, first, finish, dir)
     self:applyLines(lines, first)

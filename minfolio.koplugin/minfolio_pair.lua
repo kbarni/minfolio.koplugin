@@ -434,6 +434,14 @@ local function confirm_and_pair(fingerprint, host, port, label, attempt_channel_
     -- raise "attempt to concatenate a table value", taking the confirmation
     -- prompt down with it.
     local who = (type(label) == "string" and label ~= "") and label or _("an unnamed desktop")
+    -- Captured here, at prompt-build time, rather than read from M._armed_code
+    -- inside ok_callback below. The ConfirmBox has no timeout, so it can outlive
+    -- the 120-second armed window; when it does, isArmed() lazily calls disarm(),
+    -- which nils M._armed_code. The dialog would still be displaying the correct
+    -- six digits while the POST sent `code = nil` (rapidjson drops a nil value
+    -- entirely, so the field simply vanished from the body), and the desktop
+    -- rejected a code the user could read on screen.
+    local armed_code = M._armed_code
     M._prompt_open = true
 
     -- Released from the widget's own teardown hook, plus a backstop.
@@ -465,10 +473,19 @@ local function confirm_and_pair(fingerprint, host, port, label, attempt_channel_
         text = _("Pair with ") .. who .. _("?\n\nDesktop identity (last 12 hex of its certificate):\n")
             .. suffix .. _("\n\nAttempt received via: ") .. attempt_channel_desc
             .. _("\n\nIf these match what your desktop shows, type this code into it:\n\n")
-            .. tostring(M._armed_code),
+            .. tostring(armed_code),
         ok_text = _("Pair"),
         ok_callback = function()
             release()
+            -- The armed window is the security boundary, not decoration: a
+            -- prompt approved after it closed must not pair. Refusing here, with
+            -- a message that says what to do, is both the safe answer and a
+            -- clearer one than letting the desktop reject the request for
+            -- reasons the Kindle never explains.
+            if not M.isArmed() then
+                Chrome.notify(_("Pairing window expired -- arm pairing again and retry"))
+                return
+            end
             local cfg = { host = host, port = port, cert_fingerprint = fingerprint }
             local secret = M.secret()
             if not secret then
@@ -480,7 +497,7 @@ local function confirm_and_pair(fingerprint, host, port, label, attempt_channel_
             -- pending offer's UI, not a value that travelled the network in
             -- both directions (PAIRING_PLAN.md §4).
             local posted, err = M.post(cfg, "/kindle/pair",
-                { deviceId = M.deviceId(), secret = secret, code = M._armed_code })
+                { deviceId = M.deviceId(), secret = secret, code = armed_code })
             if posted then
                 lfs.mkdir(Config.STATE_DIR)
                 local store = Store.load(Config.MINFOLIO_PAIR_PATH)

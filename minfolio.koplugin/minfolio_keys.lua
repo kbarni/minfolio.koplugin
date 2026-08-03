@@ -24,6 +24,10 @@
 -- `MinfolioPair.disableKeyboardKeyFlash(...)` became `Keys.makeKeyboardArrowFree(...)`
 -- / `Keys.disableKeyboardKeyFlash(...)`.
 --
+-- Added later (not part of the original port): `unrotate_keyboard_arrows`, which
+-- takes the arrow keys out of KOReader's rotation remap so an external keyboard
+-- keeps its printed directions on a rotated screen. See its own comment below.
+--
 -- Required by callers as `local Keys = require("minfolio_keys")`.
 
 local Device = require("device")
@@ -164,9 +168,40 @@ function M.key_mods(key)
     end
     return out
 end
+-- KOReader rewrites arrow keys through `Device.input.rotation_map` inside
+-- `Input:handleKeyBoardEv` (frontend/device/input.lua), before the event reaches
+-- any widget: with the screen rotated clockwise, a keyboard's Left arrives as
+-- "Up", Down arrives as "Right", and so on. That mapping is written for keys
+-- that are physically part of the device and therefore turn with the screen --
+-- a Kindle's page-turn buttons, a K3/K4 five-way. An external Bluetooth
+-- keyboard does not turn with the screen, so its arrows must keep meaning what
+-- is printed on them; without this, rotating the editor makes every cursor key
+-- move the wrong way.
+--
+-- Only the four arrow names are neutralised. The LPgBack/LPgFwd/RPgBack/RPgFwd
+-- entries of the same map are left alone: those really are on-device buttons,
+-- and they are what the rotation swap was written for.
+--
+-- This patches the shared `Device.input` table -- the same global reach
+-- `install_keyboard_aliases` already takes with `event_map`, for the same
+-- reason. A widget-level fix (un-rotating the name inside `left_key` and
+-- friends) could not work: arrows are rewritten before dispatch, so it would
+-- miss every KOReader widget minfolio shows but does not own -- the InputText
+-- in the note-name prompt and the find bar, Menu's own key navigation.
+local ROTATED_ARROWS = { "Up", "Down", "Left", "Right" }
+function M.unrotate_keyboard_arrows()
+    local map = Device.input and Device.input.rotation_map
+    if not map then return end
+    for _, per_mode in pairs(map) do
+        if type(per_mode) == "table" then
+            for _, name in ipairs(ROTATED_ARROWS) do per_mode[name] = nil end
+        end
+    end
+end
 function M.install_keyboard_aliases()
     local input = Device.input
     if not input then return end
+    M.unrotate_keyboard_arrows()
     local em = input.event_map
     if em then
         for code, name in pairs(M.KEYBOARD_EVENT_MAP) do
