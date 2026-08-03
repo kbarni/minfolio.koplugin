@@ -814,6 +814,7 @@ function MDEdit:openControls()
         Chrome.show_controls({
             { text = "Find...", callback = function() self:openFindDialog() end },
             { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
+            { text = "Word count", callback = function() self:showWordCount() end },
             { text = "Exit reader mode", callback = function() self:setReaderMode(false) end },
             { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
             { text = "Save & close note", callback = function() self:saveAndClose() end },
@@ -828,7 +829,9 @@ function MDEdit:openControls()
     end
     Chrome.show_controls({
         { text = "Find...", callback = function() self:openFindDialog() end },
+        { text = "Find and replace...", callback = function() self:openReplaceDialog() end },
         { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
+        { text = "Word count", callback = function() self:showWordCount() end },
         { text = "Mindmap mode", callback = function() self:openMindmap() end },
         { text = "Reader mode", callback = function() self:setReaderMode(true) end },
         keyboard_item,

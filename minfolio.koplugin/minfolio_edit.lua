@@ -30,12 +30,16 @@ local GestureRange = require("ui/gesturerange")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
 local InputDialog = require("ui/widget/inputdialog")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
+local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 
 local MD = require("minfolio_md")
 local Text = require("minfolio_text")
+local Find = require("minfolio_find")
+local Stats = require("minfolio_stats")
 local Config = require("minfolio_config")
 local IO = require("minfolio_io")
 local State = require("minfolio_state")
@@ -85,6 +89,13 @@ function MDEdit:init()
     self.reader_mode = false
     local text = IO.read_file(self.path) or ""
     self.lines = Text.split_text_lines(text)
+    -- Writing-session baseline for the word count. Only the text itself is kept
+    -- here (a second reference to a string that already exists -- no copy, no
+    -- parse); counting it costs a full md_tokenize pass, which is not something
+    -- to spend on every note that gets opened. sessionWords does it once, the
+    -- first time the user actually asks for a count, and caches the number.
+    self._session_text = text
+    self._session_start = IO.now_seconds()
     -- The editor never owns a socket. A separate process does TLS and leaves
     -- only local, atomically-written files for this widget to consume.
     self.remote_revision = self.remote and tonumber(self.remote.revision) or 0
@@ -191,6 +202,65 @@ function MDEdit:pointToCursor(pos)
     local last = self.row_map and self.row_map[#self.row_map]
     if last then return last.line, #self.lines[last.line] end
     return self.crow, self.ccol
+end
+-- Which line's checkbox did this tap land on, if any?
+--
+-- A checkbox is not text on screen: md_tokenize gives the source "[ ] " a span
+-- with style "task" and a `display` of "\226\152\144 " (an unticked box glyph),
+-- and layoutLine turns that into one seg whose width is the GLYPH's. So the tap
+-- cannot be resolved by column -- colAtX deliberately collapses a display seg to
+-- its two edges, which would make a tap on the box indistinguishable from one
+-- just before the text. Walking the segs the way colAtX does, and asking which
+-- seg the x fell inside, is the only way to tell the two apart. Same shape as
+-- tableCellAtPos, for the same reason: rendered content, not raw text.
+--
+-- The hit zone runs from the row's left edge to the right edge of the glyph,
+-- not the glyph alone. A box is around 20px wide, well under a fingertip;
+-- everything to its left is the line's indent and the list marker, which
+-- md_tokenize renders as zero-width on a task line, so widening leftwards
+-- costs no other tap target. It stops dead at the glyph's right edge, so a tap
+-- on the text still places the caret.
+--
+-- Nothing here needs to exclude fenced code: inside a fence md_code_token
+-- styles the whole line "code", so a literal "- [ ] x" in a code block never
+-- produces a "task" seg and can never be hit.
+function MDEdit:taskBoxAtPos(pos)
+    if not pos then return nil end
+    for _, rm in ipairs(self.row_map or {}) do
+        if pos.y >= rm.y0 and pos.y < rm.y1 then
+            if rm.table then return nil end
+            local x = pos.x - C.EDIT.MDEDIT_PAD
+            if x < 0 then return nil end
+            local accx = (rm.row and rm.row.indent) or 0
+            for _, seg in ipairs((rm.row and rm.row.segs) or {}) do
+                accx = accx + (seg.w or 0)
+                -- A wrapped line's continuation rows carry no task seg, so only
+                -- the row the box is actually drawn on can match.
+                if seg.style == "task" then return x < accx and rm.line or nil end
+            end
+            return nil
+        end
+    end
+    return nil
+end
+-- Tick/untick the checkbox on `row`. Returns false when that line has none, so
+-- the caller can fall through to whatever a tap normally does there.
+function MDEdit:toggleTaskAt(row)
+    local line = self.lines[row]
+    if not line then return false end
+    local toggled = MD.md_toggle_task(line)
+    if not toggled then return false end
+    self:flushTypeBuffer()
+    -- One line changes, and only three bytes of it: snapshotLine is the cheap
+    -- undo entry for exactly this shape, and it schedules the autosave too.
+    self:snapshotLine(row)
+    self._burst = nil
+    self.lines[row] = toggled
+    -- The caret deliberately stays where it was. Ticking a box in a checklist
+    -- while writing a paragraph somewhere else must not move the insertion
+    -- point out from under the next keystroke.
+    self:refresh{ lines = { row, row } }
+    return true
 end
 function MDEdit:visibleWordRange(row, col)
     local line = self.lines[row] or ""
@@ -386,11 +456,17 @@ function MDEdit:snapshot()
     if #self._undo > 80 then table.remove(self._undo, 1) end
     self._redo = {}
 end
-function MDEdit:snapshotLine()
+-- `row` defaults to the cursor's line, which is every caller but the checkbox
+-- toggle -- that one changes a line the cursor is not on (a tap on a box does
+-- not move the caret). The recorded crow/ccol stay the CURSOR's, not the
+-- changed line's, so undoing restores the text there and leaves the caret where
+-- the user actually is.
+function MDEdit:snapshotLine(row)
+    row = row or self.crow
     self:scheduleAutosave()
     self._undo = self._undo or {}
     self._undo[#self._undo+1] = {
-        kind = "line", line = self.crow, text = self.lines[self.crow] or "",
+        kind = "line", line = row, text = self.lines[row] or "",
         crow = self.crow, ccol = self.ccol,
     }
     if #self._undo > 80 then table.remove(self._undo, 1) end
@@ -828,21 +904,12 @@ end
 -- Find deliberately uses the editor selection for the active result. This
 -- makes the match visible in both the styled editor and reader mode, and keeps
 -- copy/keyboard behaviour consistent with a normal text selection.
+-- The matching itself lives in minfolio_find (Tier 0) so that Find and Replace
+-- cannot drift apart in what they consider a match, and so the rules -- literal
+-- not pattern, case-insensitive, non-overlapping, byte columns -- are covered by
+-- minfolio_find_test.lua rather than only by trying it on a device.
 function MDEdit:findMatches(query)
-    if not query or query == "" then return {} end
-    local needle = query:lower()
-    local matches = {}
-    for row, line in ipairs(self.lines or {}) do
-        local haystack = tostring(line or ""):lower()
-        local from = 1
-        while true do
-            local first, last = haystack:find(needle, from, true)
-            if not first then break end
-            matches[#matches + 1] = { row = row, start_col = first - 1, end_col = last }
-            from = last + 1 -- non-overlapping results, like standard Find
-        end
-    end
-    return matches
+    return Find.matches(self.lines, query)
 end
 function MDEdit:showFindMatch(match, index, total)
     if not match then return false end
@@ -936,21 +1003,144 @@ function MDEdit:openFindDialog()
         UIManager:close(dlg)
         if action then action(query) end
     end
+    local buttons = {
+        {
+            { text = _("Cancel"), callback = function() close_then() end },
+            { text = _("Previous"), callback = function() close_then(function(q) self:findNext(q, -1) end) end },
+        },
+        {
+            { text = _("Next"), is_enter_default = true, callback = function() close_then(function(q) self:findNext(q, 1) end) end },
+            { text = _("Go to match"), callback = function() close_then(function(q)
+                self._find_query = q
+                self._find_bar_visible = true
+                self:goToFindMatch()
+            end) end },
+        },
+    }
+    -- Replace is an editing action, so it is offered only in editing mode --
+    -- reader mode has no caret to leave behind and no keyboard to correct with.
+    -- Handing the query over means switching dialogs never costs a retype.
+    if not self.reader_mode then
+        buttons[#buttons+1] = {
+            { text = _("Replace..."), callback = function() close_then(function(q) self:openReplaceDialog(q) end) end },
+        }
+    end
     dlg = InputDialog:new{
         title = _("Find"),
         input = initial,
+        buttons = buttons,
+    }
+    self._find_dialog = dlg
+    self.is_always_active = false
+    local original_close = dlg.onCloseWidget
+    function dlg:onCloseWidget()
+        if original_close then original_close(self) end
+        restore_focus()
+    end
+    UIManager:show(dlg)
+    dlg:onShowKeyboard()
+end
+-- ---- replace ------------------------------------------------------------
+-- Replace reuses Find's selection-as-active-match convention (see the note
+-- above findMatches): the match to be replaced is the one currently selected,
+-- which is the one the user can see highlighted. That is why "Replace" on a
+-- document with no active match only advances to the next hit -- the first tap
+-- shows what will change, the second changes it. Replacing something the user
+-- has not been shown is how a find/replace loses someone's work.
+function MDEdit:replaceCurrent(query, replacement)
+    if self.reader_mode then Chrome.notify(_("Switch to editing mode to replace")); return false end
+    self:flushTypeBuffer()
+    query = query or self._find_query or ""
+    if query == "" then Chrome.notify(_("Enter text to find")); return false end
+    replacement = Find.sanitize_replacement(replacement)
+    self._find_query, self._replace_with = query, replacement
+    self._find_bar_visible = true
+    local active = self._find_match
+    -- Same staleness test as findNext: the recorded match is only the active one
+    -- while the selection still sits exactly on it. Any cursor move since then
+    -- (or an edit that shifted the text) makes it stale.
+    local is_active = active and active.row == self.crow and active.end_col == self.ccol
+        and self.sel and self.sel.row == active.row and self.sel.col == active.start_col
+    if not is_active then return self:findNext(query, 1) end
+    self:snapshot(); self._burst = nil
+    local lines, col = Find.replace_one(self.lines, active, replacement)
+    self.lines = lines
+    self.sel = nil
+    self.crow, self.ccol = active.row, col or active.start_col
+    self._find_match, self._find_match_index = nil, nil
+    self._desired_x = nil
+    self:refresh()
+    -- Land on the next occurrence so a repeated Replace walks the document.
+    -- The cursor sits just past the text just inserted, so a replacement that
+    -- contains the query ("a" -> "aa") advances past its own output rather than
+    -- finding it again.
+    self:findNext(query, 1)
+    return true
+end
+function MDEdit:replaceAll(query, replacement)
+    if self.reader_mode then Chrome.notify(_("Switch to editing mode to replace")); return false end
+    self:flushTypeBuffer()
+    query = query or self._find_query or ""
+    if query == "" then Chrome.notify(_("Enter text to find")); return false end
+    replacement = Find.sanitize_replacement(replacement)
+    self._find_query, self._replace_with = query, replacement
+    local lines, count = Find.replace_all(self.lines, query, replacement)
+    if count == 0 then
+        self._find_match, self._find_match_index = nil, nil
+        Chrome.notify(_("No matches"))
+        return false
+    end
+    -- Snapshot BEFORE the swap: snapshot() copies the array as it is now, which
+    -- is what undo has to come back to. One snapshot for the whole run, so a
+    -- single undo puts every replaced occurrence back.
+    self:snapshot(); self._burst = nil
+    self.lines = lines
+    self.sel = nil
+    self._find_match, self._find_match_index = nil, nil
+    self._desired_x = nil
+    -- The line under the cursor may have got shorter (or, at the end of the
+    -- document, gone entirely out from under it).
+    self.crow = math.max(1, math.min(#self.lines, self.crow))
+    self.ccol = math.max(0, math.min(self.ccol, #(self.lines[self.crow] or "")))
+    self:refresh{ full = true }
+    Chrome.notify(count == 1 and _("Replaced 1 occurrence")
+        or string.format(_("Replaced %d occurrences"), count))
+    return true
+end
+function MDEdit:openReplaceDialog(query)
+    self:flushTypeBuffer()
+    if self._find_dialog then return end
+    if self.reader_mode then Chrome.notify(_("Switch to editing mode to replace")); return end
+    if self.keyboard then self:hideKeyboard() end
+    local initial = query or self._find_query or (self:hasSel() and self:selText()) or ""
+    local dlg
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self._find_dialog = nil
+        self.is_always_active = true
+        self:refresh{ layout_dirty = false, full = true }
+    end
+    local function close_then(action)
+        local fields = dlg:getFields() or {}
+        local find_text, replacement = fields[1] or "", fields[2] or ""
+        UIManager:close(dlg)
+        if action then action(find_text, replacement) end
+    end
+    dlg = MultiInputDialog:new{
+        title = _("Find and replace"),
+        fields = {
+            { description = _("Find"), text = initial, hint = _("Text to find") },
+            { description = _("Replace with"), text = self._replace_with or "", hint = _("Replacement text") },
+        },
         buttons = {
             {
                 { text = _("Cancel"), callback = function() close_then() end },
-                { text = _("Previous"), callback = function() close_then(function(q) self:findNext(q, -1) end) end },
-            },
-            {
-                { text = _("Next"), is_enter_default = true, callback = function() close_then(function(q) self:findNext(q, 1) end) end },
-                { text = _("Go to match"), callback = function() close_then(function(q)
-                    self._find_query = q
-                    self._find_bar_visible = true
-                    self:goToFindMatch()
-                end) end },
+                -- No is_enter_default anywhere in this dialog: Enter while
+                -- typing a replacement must not commit a whole-document change.
+                { text = _("Replace"), callback = function() close_then(function(q, r) self:replaceCurrent(q, r) end) end },
+                { text = _("Replace all"), callback = function() close_then(function(q, r) self:replaceAll(q, r) end) end },
             },
         },
     }
@@ -963,6 +1153,60 @@ function MDEdit:openFindDialog()
     end
     UIManager:show(dlg)
     dlg:onShowKeyboard()
+end
+-- ---- word count ---------------------------------------------------------
+-- The baseline for "this session", computed once and kept. init only stashes
+-- the opening text; the md_tokenize pass to count it happens here, the first
+-- time anyone asks, so opening a note never pays for a number nobody looked at.
+function MDEdit:sessionWords()
+    if not self._session_words then
+        self._session_words = Stats.count(self._session_text or "").words
+    end
+    return self._session_words
+end
+function MDEdit:showWordCount()
+    self:flushTypeBuffer()
+    local counts = Stats.count(self:currentText())
+    local n = Stats.group_digits
+    local parts = {
+        string.format(_("Words: %s"), n(counts.words)),
+        string.format(_("Characters: %s (%s without spaces)"), n(counts.chars), n(counts.chars_no_spaces)),
+        string.format(_("Paragraphs: %s   Lines: %s"), n(counts.paragraphs), n(counts.lines)),
+        string.format(_("Reading time: about %s min"), n(counts.minutes)),
+    }
+    if self:hasSel() then
+        local selected = Stats.count(self:selText())
+        parts[#parts+1] = ""
+        parts[#parts+1] = string.format(_("Selected: %s words, %s characters"),
+            n(selected.words), n(selected.chars))
+    end
+    local written = counts.words - self:sessionWords()
+    local minutes = math.floor(((IO.now_seconds() or 0) - (self._session_start or 0)) / 60)
+    parts[#parts+1] = ""
+    parts[#parts+1] = string.format(_("This session: %s%s words in %s min"),
+        written > 0 and "+" or "", n(written), n(math.max(0, minutes)))
+    self:showInfo(table.concat(parts, "\n"))
+end
+-- An InfoMessage is modal, but this editor is is_always_active -- without
+-- handing that flag over for the lifetime of the message, every key pressed to
+-- dismiss it would also be typed into the document underneath. Same trade the
+-- find dialog makes, same restore-on-close.
+function MDEdit:showInfo(text)
+    local msg
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self.is_always_active = true
+    end
+    msg = InfoMessage:new{ text = text, alignment = "left" }
+    self.is_always_active = false
+    local original_close = msg.onCloseWidget
+    function msg:onCloseWidget()
+        if original_close then original_close(self) end
+        restore_focus()
+    end
+    UIManager:show(msg)
 end
 function MDEdit:setReaderMode(enabled, target_row, target_col)
     enabled = not not enabled
@@ -1229,9 +1473,15 @@ function MDEdit:onKeyPress(key)
     local name = key and key.key
     if not name then return true end
     local m = Keys.key_mods(key)
-    if Keys.shortcut_mod(m) and name:lower() == "f" then
-        self:openFindDialog()
-        return true
+    local lname = name:lower()
+    -- Shortcuts that only READ the document are handled before the reader-mode
+    -- branch below, because they are just as useful there. Everything that
+    -- edits has to wait until after it (there is no caret in reader mode).
+    if Keys.shortcut_mod(m) and #name == 1 then
+        if lname == "f" then self:openFindDialog(); return true
+        elseif lname == "g" then self:findNext(self._find_query, Keys.keymod(m, "Shift") and -1 or 1); return true
+        elseif lname == "w" then self:showWordCount(); return true
+        end
     end
     if self.reader_mode then
         if Keys.left_key(name) or Keys.up_key(name) or Keys.page_up_key(name) then self:pageLeft()
@@ -1241,15 +1491,30 @@ function MDEdit:onKeyPress(key)
         end
         return true
     end
-    local lname = name:lower()
+    -- Editing shortcuts. An external keyboard is the recommended way to write
+    -- on this thing, and reaching for the touchscreen to bold a word is the
+    -- wrong shape -- every formatting action on the toolbar has a chord here.
+    -- Shifted variants are tested inside their letter's branch (the Ctrl-Z /
+    -- Ctrl-Shift-Z pattern already in place), so no letter needs two branches.
     if Keys.shortcut_mod(m) and #name == 1 then
         self:flushTypeBuffer()
-        if lname == "z" then if Keys.keymod(m, "Shift") then self:redo() else self:undo() end; return true
+        local shifted = Keys.keymod(m, "Shift")
+        if lname == "z" then if shifted then self:redo() else self:undo() end; return true
         elseif lname == "y" then self:redo(); return true
         elseif lname == "c" then self:copy(); return true
         elseif lname == "x" then self:cut(); return true
         elseif lname == "v" then self:paste(); return true
-        elseif lname == "a" then self:selectAll(); return true end
+        elseif lname == "a" then self:selectAll(); return true
+        elseif lname == "b" then self:fmtWrap("**"); return true
+        elseif lname == "i" then self:fmtWrap("*"); return true
+        elseif lname == "e" then self:fmtWrap("`"); return true
+        elseif lname == "h" then self:openReplaceDialog(); return true
+        elseif lname == "s" then if self:save() then Chrome.notify(_("Saved")) end; return true
+        elseif lname == "l" and shifted then self:fmtList(); return true
+        elseif lname == "o" and shifted then self:fmtOrdered(); return true
+        elseif lname == "t" and shifted then self:fmtTask(); return true
+        elseif lname:match("^[0-6]$") then self:fmtHeadingLevel(tonumber(lname)); return true
+        end
     end
     if name == "Backspace" or name == "BackSpace" or name == "Del" or name == "Delete" then
         self:flushTypeBuffer()
@@ -1425,6 +1690,33 @@ function MDEdit:fmtToggle(findpat, prefix)  -- remove existing line prefix, else
     self:refresh()
 end
 function MDEdit:fmtHeader() self:fmtToggle("^(#+%s)", "# ") end
+-- Set the current line's heading level outright (Ctrl-1 .. Ctrl-6), rather than
+-- toggling one level like fmtHeader: going from "## " to "### " by toolbar
+-- means removing the heading and re-adding it. Level 0 -- and asking for the
+-- level the line already has -- makes it an ordinary paragraph again, which is
+-- what makes Ctrl-1 on an H1 behave like every other toggle in the editor.
+--
+-- Reads the prefix through MD.heading so the "#{1,6}" trap documented there
+-- cannot be reintroduced here.
+function MDEdit:fmtHeadingLevel(level)
+    level = tonumber(level) or 0
+    if level < 0 or level > 6 then return end
+    local line = self.lines[self.crow] or ""
+    local hashes, _unused, prefix = MD.heading(line)
+    local old_len = (hashes and prefix) and #prefix or 0
+    local body = line:sub(old_len + 1)
+    local new_prefix = ""
+    if level > 0 and not (hashes and #hashes == level) then
+        new_prefix = string.rep("#", level) .. " "
+    end
+    if new_prefix == "" and old_len == 0 then return end   -- nothing to change
+    self:snapshot(); self._burst = nil
+    local newline = new_prefix .. body
+    self.lines[self.crow] = newline
+    self.ccol = math.max(0, math.min(#newline, self.ccol + #new_prefix - old_len))
+    self._desired_x = nil
+    self:refresh()
+end
 function MDEdit:fmtList()   self:setLinePrefix("bullet") end
 function MDEdit:fmtOrdered() self:setLinePrefix("ordered") end
 function MDEdit:fmtTask()
@@ -1503,6 +1795,18 @@ function MDEdit:onTap(_, ges)
                 return true
             end
         end
+        -- A tap on a checkbox ticks it in reader mode too -- reading down a list
+        -- and ticking things off is most of what a task list is for. Checked
+        -- BEFORE the edge page-turn zones for the same reason the highlight
+        -- check above is: the box sits at the left margin, inside the left
+        -- page-turn strip, so anywhere later and it could never be hit.
+        local reader_task_row = self:taskBoxAtPos(p)
+        if reader_task_row and self:toggleTaskAt(reader_task_row) then
+            self._rtap = nil
+            if self._page_pending then UIManager:unschedule(self._page_pending); self._page_pending = nil end
+            self:save()
+            return true
+        end
         -- Taps near the L/R/bottom edge are page-turns (likely scrolling), never
         -- an exit gesture -- page immediately, no double-tap delay.
         if p.x < C.EDIT.MDEDIT_READER_EDGE or p.x > self.fw - C.EDIT.MDEDIT_READER_EDGE
@@ -1538,6 +1842,15 @@ function MDEdit:onTap(_, ges)
         end
         self._page_pending = fn
         UIManager:scheduleIn(C.EDIT.MDEDIT_READER_DTAP, fn)
+        return true
+    end
+    -- Checkboxes render as boxes in edit mode too, so a tap on one ticks it
+    -- rather than dropping a caret into the "[ ]" behind the glyph. Clearing
+    -- _last_tap keeps the toggle from counting as half of a double-tap, which
+    -- would otherwise select a word on the second tick.
+    local task_row = self:taskBoxAtPos(p)
+    if task_row and self:toggleTaskAt(task_row) then
+        self._last_tap = nil
         return true
     end
     -- Tables render as tables in edit mode too, so a tap on a cell edits that

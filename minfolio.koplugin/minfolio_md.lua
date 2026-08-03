@@ -359,6 +359,29 @@ function M.md_table_block(lines, start_i)
     return { start = start_i, finish = finish, ncols = ncols, aligns = aligns, rows = rows }
 end
 
+-- Tick or untick a task line: "- [ ] x" <-> "- [x] x". Returns the new line and
+-- the new checked state, or nil when the line carries no checkbox at all.
+--
+-- Only the three bytes of the box itself are rewritten. Everything around them
+-- -- the indent, the list marker, the run of whitespace after the box, the text
+-- -- is carried through untouched, so ticking a box can never reflow, reindent
+-- or renumber the line it is on. That is also why this replaces a fixed 3-byte
+-- slice rather than rebuilding the prefix from md_split_line_prefix's pieces:
+-- "[ ]" and "[x]" are always exactly three bytes, and a rebuild would normalise
+-- spacing the user chose.
+--
+-- "[X]" (capital) unticks like any other checked box, but always ticks back to
+-- lowercase "[x]" -- the form md_tokenize's own task rendering and this
+-- plugin's fmtTask both produce.
+function M.md_toggle_task(line)
+    line = tostring(line or "")
+    local indent, _kind, marker, task = M.md_split_line_prefix(line)
+    if not task then return nil end
+    local box_at = #indent + #(marker or "")
+    local checked = task:match("^%[[xX]%]") ~= nil
+    return line:sub(1, box_at) .. (checked and "[ ]" or "[x]") .. line:sub(box_at + 4), not checked
+end
+
 function M.md_split_line_prefix(line)
     local indent, rest = line:match("^(%s*)(.*)$")
     local marker, body = rest:match("^([%-%*%+]%s+)(.*)$")

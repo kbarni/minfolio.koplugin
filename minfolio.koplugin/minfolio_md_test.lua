@@ -532,5 +532,77 @@ do
     check("heading: nil input is handled without error", MD.heading(nil) == nil)
 end
 
+-- ---------------------------------------------------------------------------
+-- md_toggle_task: ticking a checkbox must change the box and nothing else.
+-- This is what a tap on the rendered box calls (MDEdit:toggleTaskAt).
+-- ---------------------------------------------------------------------------
+
+do
+    local line, checked = MD.md_toggle_task("- [ ] buy milk")
+    check("md_toggle_task: an empty box ticks", line == "- [x] buy milk")
+    check("md_toggle_task: and reports the new state as checked", checked == true)
+
+    line, checked = MD.md_toggle_task("- [x] buy milk")
+    check("md_toggle_task: a ticked box unticks", line == "- [ ] buy milk")
+    check("md_toggle_task: and reports the new state as unchecked", checked == false)
+
+    check("md_toggle_task: a capital [X] unticks like any other checked box",
+        MD.md_toggle_task("- [X] done") == "- [ ] done")
+    check("md_toggle_task: ticking always produces lowercase [x]",
+        MD.md_toggle_task("- [ ] a") == "- [x] a")
+end
+
+do
+    -- Every list form md_split_line_prefix accepts, since the box position is
+    -- computed from the prefix it reports.
+    check("md_toggle_task: a bare checkbox with no list marker",
+        MD.md_toggle_task("[ ] standalone") == "[x] standalone")
+    check("md_toggle_task: an asterisk bullet", MD.md_toggle_task("* [ ] a") == "* [x] a")
+    check("md_toggle_task: a plus bullet", MD.md_toggle_task("+ [ ] a") == "+ [x] a")
+    check("md_toggle_task: an ordered '1.' marker", MD.md_toggle_task("1. [ ] a") == "1. [x] a")
+    check("md_toggle_task: an ordered '1)' marker", MD.md_toggle_task("1) [ ] a") == "1) [x] a")
+    check("md_toggle_task: a multi-digit ordered marker",
+        MD.md_toggle_task("12. [ ] a") == "12. [x] a")
+end
+
+do
+    -- Nesting and spacing are the user's; the toggle must not normalise them.
+    check("md_toggle_task: leading indent is preserved exactly",
+        MD.md_toggle_task("    - [ ] nested") == "    - [x] nested")
+    check("md_toggle_task: a tab indent is preserved exactly",
+        MD.md_toggle_task("\t- [ ] tabbed") == "\t- [x] tabbed")
+    check("md_toggle_task: extra spaces after the box are preserved",
+        MD.md_toggle_task("-   [ ]   wide") == "-   [x]   wide")
+    check("md_toggle_task: trailing whitespace is preserved",
+        MD.md_toggle_task("- [ ] a   ") == "- [x] a   ")
+    check("md_toggle_task: the text is untouched, including brackets in it",
+        MD.md_toggle_task("- [ ] see [ ] below") == "- [x] see [ ] below")
+    check("md_toggle_task: only the FIRST box on the line is the checkbox",
+        MD.md_toggle_task("- [x] and [x] again") == "- [ ] and [x] again")
+end
+
+do
+    -- Lines with no checkbox return nil, which is how MDEdit:toggleTaskAt knows
+    -- a tap landed on something that is not a task.
+    check("md_toggle_task: a plain list item has no box", MD.md_toggle_task("- item") == nil)
+    check("md_toggle_task: prose has no box", MD.md_toggle_task("just text") == nil)
+    check("md_toggle_task: a heading has no box", MD.md_toggle_task("# Title") == nil)
+    check("md_toggle_task: an empty line has no box", MD.md_toggle_task("") == nil)
+    check("md_toggle_task: nil input is handled without error", MD.md_toggle_task(nil) == nil)
+    check("md_toggle_task: a bracket pair that is not a checkbox is not a box",
+        MD.md_toggle_task("- [y] no") == nil)
+    check("md_toggle_task: a box with no space after it is not a checkbox",
+        MD.md_toggle_task("- [ ]no space") == nil)
+end
+
+do
+    -- Round trip: two toggles return the original line byte for byte.
+    local original = "  * [X]   Ship it   "
+    local once = MD.md_toggle_task(original)
+    local twice = MD.md_toggle_task(once)
+    check("md_toggle_task: toggling twice restores everything but the box case",
+        twice == "  * [x]   Ship it   " and once == "  * [ ]   Ship it   ")
+end
+
 print(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)
