@@ -61,19 +61,19 @@ function M.parse_mindmap(markdown, title)
                 attach(level, M.mindmap_node("heading", htext, i, level, { level = level }))
                 i = i + 1
             else
-                local fence, info = line:match("^%s*(```)(.*)$")
-                if not fence then fence, info = line:match("^%s*(~~~)(.*)$") end
-                if fence then
-                    local marker = fence
-                    local start_line = i
-                    local raw = { line }
-                    i = i + 1
-                    while i <= #lines do
-                        raw[#raw+1] = lines[i]
-                        if lines[i]:match("^%s*" .. marker) then i = i + 1; break end
-                        i = i + 1
-                    end
-                    attach(heading_level + 1, M.mindmap_node("code", (MD.md_trim(info) ~= "" and ("``` " .. MD.md_trim(info)) or "``` code"), start_line, heading_level + 1, { raw = raw }))
+                -- Fence extent comes from MD.md_code_block, the same reading the
+                -- editor lays out from. This used to be a second, looser copy of
+                -- the rule here (exactly three backticks; any later fence line
+                -- closed the block, info string or not), so a ```lua nested in a
+                -- ```` block ended it in the map while the editor ran on to the
+                -- real closer -- one document, two disagreeing readings of it,
+                -- the same failure the "1)" note in md_tokenize describes.
+                local blk = MD.md_code_block(lines, i)
+                if blk then
+                    local raw = {}
+                    for li = blk.start, blk.finish do raw[#raw+1] = lines[li] end
+                    attach(heading_level + 1, M.mindmap_node("code", (blk.lang ~= "" and ("``` " .. blk.lang) or "``` code"), blk.start, heading_level + 1, { raw = raw }))
+                    i = blk.finish + 1
                 elseif line:match("^%s*>") then
                     local start_line = i
                     local parts = {}
@@ -106,7 +106,7 @@ function M.parse_mindmap(markdown, title)
                             local l = lines[i] or ""
                             if MD.md_trim(l) == "" then break end
                             if MD.heading(l) or l:match("^%s*[-*+]%s+") or l:match("^%s*%d+[.)]%s+")
-                                or l:match("^%s*>") or l:match("^%s*```") or l:match("^%s*~~~") then break end
+                                or l:match("^%s*>") or MD.md_fence(l) then break end
                             parts[#parts+1] = l
                             i = i + 1
                         end

@@ -215,6 +215,121 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- Fenced code blocks: md_fence, md_fence_closes, md_code_block, md_code_map,
+-- md_code_token, and md_tokenize's fence state
+-- ---------------------------------------------------------------------------
+
+do
+    local marker, info = MD.md_fence("```python")
+    check("fence: three backticks open a fence, info string is the language", marker == "```" and info == "python")
+
+    marker, info = MD.md_fence("```")
+    check("fence: a bare ``` is a fence with an empty info string", marker == "```" and info == "")
+
+    marker = MD.md_fence("~~~~")
+    check("fence: tildes are a fence marker too, and the run length is kept", marker == "~~~~")
+
+    marker, info = MD.md_fence("`````lua")
+    check("fence: more than three backticks is still a fence ('```+' is 3-or-more, not a {n,m} bound)",
+        marker == "`````" and info == "lua")
+
+    check("fence: two backticks are not a fence", MD.md_fence("``x``") == nil)
+    check("fence: a line of inline code is not a fence (backtick in the info string)",
+        MD.md_fence("a `b` c and ```d") == nil)
+    check("fence: ordinary prose is not a fence", MD.md_fence("not a fence") == nil)
+    check("fence: nil input is handled without error", MD.md_fence(nil) == nil)
+
+    local _, _, indent = MD.md_fence("   ```sh")
+    check("fence: leading indentation is reported, not rejected", indent == "   ")
+end
+
+do
+    check("fence_closes: same marker, no info string, closes", MD.md_fence_closes("```", "```", ""))
+    check("fence_closes: a longer closer closes a shorter opener", MD.md_fence_closes("```", "````", ""))
+    check("fence_closes: a shorter closer does NOT close a longer opener", not MD.md_fence_closes("````", "```", ""))
+    check("fence_closes: a closer may not carry an info string", not MD.md_fence_closes("```", "```", "lua"))
+    check("fence_closes: ``` does not close a ~~~ block", not MD.md_fence_closes("~~~", "```", ""))
+    check("fence_closes: nil marker is not a closer", not MD.md_fence_closes("```", nil, nil))
+end
+
+do
+    local lines = { "intro", "```python", "print(1)", "```", "after" }
+    local blk = MD.md_code_block(lines, 2)
+    check("code_block: spans the opener through the closer", blk.start == 2 and blk.finish == 4)
+    check("code_block: reports the info string as lang", blk.lang == "python")
+    check("code_block: reports a matched pair as closed", blk.closed == true)
+    check("code_block: a non-fence line opens nothing", MD.md_code_block(lines, 1) == nil)
+    check("code_block: the closer itself opens nothing further (it has no info string, but is a fence)",
+        MD.md_code_block(lines, 4).finish == 5)
+end
+
+do
+    -- CommonMark 4.5: an unclosed fence runs to the end of the document. This is
+    -- also what makes typing one feel right in the editor -- the block exists as
+    -- soon as the opener does, instead of appearing only once a pair is complete.
+    local blk = MD.md_code_block({ "```", "one", "two" }, 1)
+    check("code_block: an unclosed fence runs to the last line", blk.finish == 3)
+    check("code_block: an unclosed fence reports closed == false", blk.closed == false)
+end
+
+do
+    -- A fence of the other character, and a fence carrying an info string, are
+    -- both content: neither may end the block early.
+    local blk = MD.md_code_block({ "~~~", "```", "x", "```lua", "~~~", "after" }, 1)
+    check("code_block: only a matching closer ends the block", blk.finish == 5)
+end
+
+do
+    local lines = { "para", "```sh", "ls | wc", "```", "tail" }
+    local map = MD.md_code_map(lines)
+    check("code_map: lines outside a block are absent", map[1] == nil and map[5] == nil)
+    check("code_map: both fence lines are marked 'fence'", map[2] == "fence" and map[4] == "fence")
+    check("code_map: content lines are marked 'code'", map[3] == "code")
+
+    local open = MD.md_code_map({ "```", "a", "b" })
+    check("code_map: an unclosed block covers every line to the end", open[1] == "fence" and open[2] == "code" and open[3] == "code")
+
+    local two = MD.md_code_map({ "```", "a", "```", "middle", "```", "b", "```" })
+    check("code_map: two blocks are found, and the text between them is not code",
+        two[2] == "code" and two[4] == nil and two[6] == "code")
+    local empty_n = 0
+    for _ in pairs(MD.md_code_map({})) do empty_n = empty_n + 1 end
+    check("code_map: empty input is handled without error", empty_n == 0)
+end
+
+do
+    local tok = MD.md_code_token("  x = **not bold**", false)
+    check("code_token: block is 'code'", tok.block == "code")
+    check("code_token: the line is one verbatim span -- no inline parsing, indentation kept",
+        #tok.spans == 1 and tok.spans[1].text == "  x = **not bold**" and tok.spans[1].style == "code")
+
+    local fence_tok = MD.md_code_token("```python", true)
+    check("code_token: a fence line gets block 'code_fence' and the 'fence' style", fence_tok.block == "code_fence"
+        and fence_tok.spans[1].style == "fence")
+    check("code_token: the fence's own backticks stay visible, unlike every other marker",
+        fence_tok.spans[1].text == "```python")
+end
+
+do
+    -- The whole point of the fence state in md_tokenize: a construct inside a
+    -- block must not be read as the construct it looks like.
+    local lines = MD.md_tokenize("intro\n```python\n# a comment\n- not a bullet\n| a | b |\n```\n# Real Heading")
+    check("tokenize: text before the fence still parses normally", lines[1].block == "normal")
+    check("tokenize: the opening fence is a code_fence line", lines[2].block == "code_fence")
+    check("tokenize: a '#' comment inside a block is code, not a heading", lines[3].block == "code")
+    check("tokenize: a '-' line inside a block is code, not a bullet", lines[4].block == "code")
+    check("tokenize: a pipe line inside a block is code", lines[5].block == "code")
+    check("tokenize: the closing fence is a code_fence line", lines[6].block == "code_fence")
+    check("tokenize: parsing resumes after the closer", lines[7].block == "h1")
+end
+
+do
+    local lines = MD.md_tokenize("```\n**verbatim**\n")
+    check("tokenize: an unclosed fence keeps every following line as code", lines[2].block == "code"
+        and lines[2].spans[1].text == "**verbatim**")
+end
+
+-- ---------------------------------------------------------------------------
 -- md_trim
 -- ---------------------------------------------------------------------------
 

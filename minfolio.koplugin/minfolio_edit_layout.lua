@@ -187,28 +187,57 @@ function MDEdit:computeVisualRows(text_w)
     local prev = (self._wrap_cache_w == text_w) and self._wrap_cache or nil
     local old_cache = self._wrap_cache
     local cache, out = {}, {}
-    local function appendLine(i)
-        local text = self.lines[i]
-        local entry = cache[text] or (prev and prev[text])
-        if not entry then
-            local toks = MD.md_tokenize(text)[1]
-            entry = { rows = self:layoutLine(toks, text_w), block = toks.block }
-        end
-        cache[text] = entry
+    local code_map = {}
+    local function emit(i, key, entry)
+        cache[key] = entry
         for ri, row in ipairs(entry.rows) do
             out[#out+1] = { kind = "row", line = i, row = row, block = entry.block, ri = ri }
         end
+    end
+    local function build(toks)
+        return { rows = self:layoutLine(toks, text_w), block = toks.block }
+    end
+    local function appendLine(i)
+        local text = self.lines[i]
+        -- `or` short-circuits, so a cache hit never reaches md_tokenize.
+        emit(i, text, cache[text] or (prev and prev[text]) or build(MD.md_tokenize(text)[1]))
         if i < #self.lines then
             out[#out+1] = { kind = "gap", line = i, h = C.EDIT.MDEDIT_PARA_GAP }
         end
     end
+    -- One line of a fenced code block. The wrap cache is keyed by line text and
+    -- shared with ordinary lines, so the key has to record that this line was
+    -- tokenized as code: "**x**" renders two different ways inside and outside a
+    -- fence, and the bare text as a key would hand one of them the other's rows.
+    local function appendCodeLine(i, is_fence)
+        local text = self.lines[i]
+        local key = "\1code\1" .. tostring(is_fence) .. "\1" .. text
+        emit(i, key, cache[key] or (prev and prev[key]) or build(MD.md_code_token(text, is_fence)))
+    end
     local i = 1
     while i <= #self.lines do
+        -- Fenced code blocks come first: inside one, nothing else parses -- not
+        -- the table grammar below (a shell pipeline is not a table row), not
+        -- headings, not bullets. Rows are emitted with no MDEDIT_PARA_GAP
+        -- between them so the block's background band is continuous; the pad
+        -- rows at either end are gaps that carry the band themselves.
+        local code = MD.md_code_block(self.lines, i)
         -- Tables render as tables in every mode (edit and reader). Cells are
         -- edited by tapping them (openTableCellEditor); the raw pipe syntax is
         -- never shown as plain text.
-        local tbl = MD.md_table_block(self.lines, i)
-        if tbl then
+        local tbl = not code and MD.md_table_block(self.lines, i)
+        if code then
+            for li = code.start, code.finish do code_map[li] = true end
+            out[#out+1] = { kind = "gap", line = code.start, h = C.EDIT.MDEDIT_CODE_PAD, code = true }
+            for li = code.start, code.finish do
+                appendCodeLine(li, li == code.start or (code.closed and li == code.finish))
+            end
+            out[#out+1] = { kind = "gap", line = code.finish, h = C.EDIT.MDEDIT_CODE_PAD, code = true }
+            if code.finish < #self.lines then
+                out[#out+1] = { kind = "gap", line = code.finish, h = C.EDIT.MDEDIT_PARA_GAP }
+            end
+            i = code.finish + 1
+        elseif tbl then
             for _, entry in ipairs(self:layoutTable(tbl, text_w)) do
                 out[#out+1] = entry
             end
@@ -227,6 +256,8 @@ function MDEdit:computeVisualRows(text_w)
         end
     end
     self._wrap_cache, self._wrap_cache_w = cache, text_w
+    -- Which lines this layout treated as code, for updateVisualLine to refuse.
+    self._code_lines = code_map
     if #out == 0 then out[1] = { kind = "row", line = 1, row = { segs = {}, w = 0, sb = 0 }, block = "normal", ri = 1 } end
     return out
 end
@@ -268,6 +299,11 @@ function MDEdit:updateVisualLine(line)
     local text = self.lines[line] or ""
     if text:find("|", 1, true) or ((self.lines[line - 1] or ""):find("|", 1, true))
         or ((self.lines[line + 1] or ""):find("|", 1, true)) then return false end
+    -- Code blocks are structural in the same way tables are, but with a longer
+    -- reach: a fence changes how every line below it reads, so a single-line
+    -- relayout is only safe well away from one. Bail if the last full layout put
+    -- this line inside a block, or if the edit just produced a fence line.
+    if (self._code_lines and self._code_lines[line]) or MD.md_fence(text) then return false end
     local range = self._vrow_line_ranges and self._vrow_line_ranges[line]
     if not range then return false end
     for vi = range.first, range.last do

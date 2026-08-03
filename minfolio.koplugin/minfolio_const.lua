@@ -71,6 +71,12 @@ M.EDIT = {
     -- Light-gray fill drawn behind ==highlighted== text (distinct from the darker
     -- selection gray, and light enough to keep black text legible on e-ink).
     MDEDIT_HIGHLIGHT_GRAY = Blitbuffer.Color8(190),
+    -- Band drawn behind a fenced code block, full text width, every row of the
+    -- block plus MDEDIT_CODE_PAD above and below. Much lighter than the
+    -- highlight gray: it covers whole paragraphs rather than a few words, and
+    -- has to stay quiet under monospace text on e-ink.
+    MDEDIT_CODE_GRAY = Blitbuffer.Color8(228),
+    MDEDIT_CODE_PAD = 8,
 }
 
 M.MAP = {

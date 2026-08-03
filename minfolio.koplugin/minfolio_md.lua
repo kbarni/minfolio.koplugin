@@ -12,6 +12,11 @@
 -- forward-declared at main.lua:3868 and assigned far away at main.lua:4682 -- this module is
 -- its natural home (pure line-prefix parsing), not a workaround for the forward declaration.
 --
+-- Fenced code blocks (md_fence, md_fence_closes, md_code_block, md_code_map,
+-- md_code_token) were added later, and are grouped together below md_trim. They
+-- are the second multi-line construct here, after tables: a fence's meaning is
+-- not readable from its own line, so they take (lines, i) like md_table_block.
+--
 -- Deliberately EXCLUDES md_face/md_color (need Font/Blitbuffer -- render-facing helpers that
 -- belong in a later minfolio_style module) and MD_FACES/MDEDIT_TABLE_PAD_X/Y (render
 -- constants, same later module). Pulling those in here would silently reintroduce a KOReader
@@ -76,51 +81,68 @@ function M.md_tokenize(textstr)
         for _, s in ipairs(M.md_inline(rest)) do spans[#spans+1] = s end
         return { block = block or "normal", spans = spans }
     end
+    -- The one construct here whose reading depends on lines other than its own:
+    -- everything between an opening ``` and its closer is verbatim, so none of
+    -- the rules below may look at it. `fence` holds the opening marker while a
+    -- block is open. Callers that tokenize a single line at a time (the editor's
+    -- layout path) cannot carry this state in a string, so they must find the
+    -- block themselves with M.md_code_block and call M.md_code_token per line.
+    local fence
     for line in (tostring(textstr or "") .. "\n"):gmatch("(.-)\n") do
-        local hashes, hrest = line:match("^(#+%s+)(.*)$")
-        if hashes then
-            local level = math.min(#hashes:gsub("%s", ""), 3)
-            lines[#lines+1] = { block = "h"..level, spans = {{ text = hashes, style = "syntax", display = "" }, { text = hrest, style = "h"..level }} }
+        local marker, info = M.md_fence(line)
+        if fence then
+            local closes = M.md_fence_closes(fence, marker, info)
+            lines[#lines+1] = M.md_code_token(line, closes)
+            if closes then fence = nil end
+        elseif marker then
+            fence = marker
+            lines[#lines+1] = M.md_code_token(line, true)
         else
-            local pre, rest = line:match("^(%s*[%-%*%+]%s+)(.*)$")
-            local ordered = false
-            if not pre then
-                -- "1)" is an ordered-list delimiter in CommonMark exactly like
-                -- "1.", and parse_mindmap/lineKind already accepted both -- so a
-                -- "1)" list showed up as list nodes in the mindmap while this
-                -- tokenizer rendered the same lines as plain paragraphs, and
-                -- md_split_line_prefix (below) gave them no continuation on
-                -- Enter. One document, two disagreeing readings of it.
-                pre, rest = line:match("^(%s*%d+[%.%)]%s+)(.*)$")
-                ordered = pre ~= nil
-            end
-            if pre then
-                local task, taskrest = rest:match("^(%[[ xX]%]%s+)(.*)$")
-                local spans = {}
-                spans[#spans+1] = { text = pre, style = "bullet", display = task and "" or (ordered and pre:gsub("^%s+", "") or "\226\128\162 ") }
-                if task then
-                    local checked = task:match("%[[xX]%]") ~= nil
-                    spans[#spans+1] = { text = task, style = "task", display = checked and "\226\152\145 " or "\226\152\144 " }
-                    rest = taskrest
-                end
-                for _, s in ipairs(M.md_inline(rest)) do spans[#spans+1] = s end
-                -- Keep the leading whitespace so nested items render indented; the
-                -- marker span's display drops it (fixed glyph), so the indent is
-                -- reapplied as real horizontal space in layoutLine.
-                lines[#lines+1] = { block = "bullet", spans = spans, indent_ws = pre:match("^%s*") or "" }
+            local hashes, hrest = line:match("^(#+%s+)(.*)$")
+            if hashes then
+                local level = math.min(#hashes:gsub("%s", ""), 3)
+                lines[#lines+1] = { block = "h"..level, spans = {{ text = hashes, style = "syntax", display = "" }, { text = hrest, style = "h"..level }} }
             else
-                local task, taskrest = line:match("^(%s*%[[ xX]%]%s+)(.*)$")
-                if task then
-                    local checked = task:match("%[[xX]%]") ~= nil
-                    local tok = with_prefix(task, taskrest, "bullet", checked and "\226\152\145 " or "\226\152\144 ", "task")
-                    tok.indent_ws = task:match("^%s*") or ""
-                    lines[#lines+1] = tok
+                local pre, rest = line:match("^(%s*[%-%*%+]%s+)(.*)$")
+                local ordered = false
+                if not pre then
+                    -- "1)" is an ordered-list delimiter in CommonMark exactly like
+                    -- "1.", and parse_mindmap/lineKind already accepted both -- so a
+                    -- "1)" list showed up as list nodes in the mindmap while this
+                    -- tokenizer rendered the same lines as plain paragraphs, and
+                    -- md_split_line_prefix (below) gave them no continuation on
+                    -- Enter. One document, two disagreeing readings of it.
+                    pre, rest = line:match("^(%s*%d+[%.%)]%s+)(.*)$")
+                    ordered = pre ~= nil
+                end
+                if pre then
+                    local task, taskrest = rest:match("^(%[[ xX]%]%s+)(.*)$")
+                    local spans = {}
+                    spans[#spans+1] = { text = pre, style = "bullet", display = task and "" or (ordered and pre:gsub("^%s+", "") or "\226\128\162 ") }
+                    if task then
+                        local checked = task:match("%[[xX]%]") ~= nil
+                        spans[#spans+1] = { text = task, style = "task", display = checked and "\226\152\145 " or "\226\152\144 " }
+                        rest = taskrest
+                    end
+                    for _, s in ipairs(M.md_inline(rest)) do spans[#spans+1] = s end
+                    -- Keep the leading whitespace so nested items render indented; the
+                    -- marker span's display drops it (fixed glyph), so the indent is
+                    -- reapplied as real horizontal space in layoutLine.
+                    lines[#lines+1] = { block = "bullet", spans = spans, indent_ws = pre:match("^%s*") or "" }
                 else
-                    if line:match("^>%s?") then
-                        pre, rest = line:match("^(>%s?)(.*)$")
-                        lines[#lines+1] = with_prefix(pre, rest, "quote", "", "syntax")
+                    local task, taskrest = line:match("^(%s*%[[ xX]%]%s+)(.*)$")
+                    if task then
+                        local checked = task:match("%[[xX]%]") ~= nil
+                        local tok = with_prefix(task, taskrest, "bullet", checked and "\226\152\145 " or "\226\152\144 ", "task")
+                        tok.indent_ws = task:match("^%s*") or ""
+                        lines[#lines+1] = tok
                     else
-                        lines[#lines+1] = { block = "normal", spans = M.md_inline(line) }
+                        if line:match("^>%s?") then
+                            pre, rest = line:match("^(>%s?)(.*)$")
+                            lines[#lines+1] = with_prefix(pre, rest, "quote", "", "syntax")
+                        else
+                            lines[#lines+1] = { block = "normal", spans = M.md_inline(line) }
+                        end
                     end
                 end
             end
@@ -131,6 +153,96 @@ end
 
 function M.md_trim(s)
     return tostring(s or ""):match("^%s*(.-)%s*$") or ""
+end
+
+-- ---------------------------------------------------------------------------
+-- Fenced code blocks (CommonMark 4.5)
+--
+-- Like tables, and unlike everything else in this file, a fence is not a
+-- property of the line it sits on: ``` opens a region in which no other
+-- Markdown rule applies, and only a matching closer ends it. Every consumer
+-- therefore needs the surrounding lines, which is why these take (lines, i) --
+-- the same shape as md_table_block -- rather than the (line) shape used by
+-- md_split_line_prefix and friends.
+-- ---------------------------------------------------------------------------
+
+-- A fence line: three or more backticks or tildes, optionally indented.
+-- Returns marker, info, indent -- or nil when the line is not a fence.
+--
+-- "```+" is three-or-more backticks: two literal ones plus a "+" quantifier on
+-- the third. It is NOT "`{3,}" -- Lua patterns have no {n,m} quantifier at all,
+-- the same trap that broke every heading site until M.heading centralised it.
+function M.md_fence(line)
+    line = tostring(line or "")
+    local indent, marker, info = line:match("^(%s*)(```+)(.*)$")
+    if not marker then indent, marker, info = line:match("^(%s*)(~~~+)(.*)$") end
+    if not marker then return nil end
+    -- CommonMark: a backtick opener's info string may not contain a backtick, or
+    -- a line of inline code like ``a `b` c`` would read as a fence.
+    if marker:sub(1, 1) == "`" and info:find("`", 1, true) then return nil end
+    return marker, M.md_trim(info), indent
+end
+
+-- Does the fence line described by (marker, info) close a block opened by
+-- `open`? Only a run of the same character, at least as long, with nothing but
+-- whitespace after it -- so ``` never closes a ~~~ block, and ```lua inside a
+-- block is content, not a closer.
+function M.md_fence_closes(open, marker, info)
+    if not open or not marker then return false end
+    return marker:sub(1, 1) == open:sub(1, 1) and #marker >= #open and (info or "") == ""
+end
+
+-- The fenced block opened at lines[start_i], or nil if that line is not a fence.
+-- `finish` is the closing fence's line, or #lines when the fence is never closed
+-- -- CommonMark's rule, and the one that makes typing a fence feel right: the
+-- block appears the moment the opener exists and stops growing once the closer
+-- is typed, instead of waiting for a complete pair before showing anything.
+function M.md_code_block(lines, start_i)
+    local marker, info = M.md_fence(lines and lines[start_i])
+    if not marker then return nil end
+    local finish, closed = #lines, false
+    for i = start_i + 1, #lines do
+        local m, minfo = M.md_fence(lines[i])
+        if M.md_fence_closes(marker, m, minfo) then
+            finish, closed = i, true
+            break
+        end
+    end
+    return { start = start_i, finish = finish, lang = info, marker = marker, closed = closed }
+end
+
+-- Line number -> "fence" | "code" for every line covered by a fenced block, so a
+-- caller holding one line number can ask whether Markdown applies there at all
+-- (the editor's Enter-continuation and Outline both do). One pass; md_code_block
+-- returns nil immediately for a non-fence line, so this is O(#lines).
+function M.md_code_map(lines)
+    local map, i = {}, 1
+    lines = lines or {}
+    while i <= #lines do
+        local blk = M.md_code_block(lines, i)
+        if blk then
+            for li = blk.start, blk.finish do map[li] = "code" end
+            map[blk.start] = "fence"
+            if blk.closed then map[blk.finish] = "fence" end
+            i = blk.finish + 1
+        else
+            i = i + 1
+        end
+    end
+    return map
+end
+
+-- One tokenized line of a fenced block, in md_tokenize's token shape so the
+-- editor's layout path can treat it like any other line. Deliberately does NOT
+-- go through md_inline: inside a fence, `**` is two asterisks, a leading '#' is
+-- a comment and not a heading, and the leading whitespace carrying the code's
+-- own indentation is content that has to survive verbatim.
+function M.md_code_token(text, is_fence)
+    text = tostring(text or "")
+    if is_fence then
+        return { block = "code_fence", spans = {{ text = text, style = "fence" }} }
+    end
+    return { block = "code", spans = {{ text = text, style = "code" }} }
 end
 
 -- ATX heading: one to six leading '#' followed by whitespace.

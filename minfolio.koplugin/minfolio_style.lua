@@ -29,6 +29,12 @@ M.MD_FACES = {
     normal = {"cfont", 22}, h1 = {"tfont", 34}, h2 = {"tfont", 29}, h3 = {"tfont", 25},
     bullet = {"cfont", 22}, task = {"cfont", 22}, quote = {"cfont", 22}, bold = {"tfont", 22}, italic = {"ifont", 22},
     code = {"infont", 20}, syntax = {"cfont", 22},
+    -- A fenced block's ``` lines. Unlike every other Markdown marker here they
+    -- are rendered rather than hidden (display = ""): a code block's extent is
+    -- structural, the user needs to see where it ends to edit it, and the block
+    -- has a background band that a hidden zero-width line would leave a gap in.
+    -- Same monospace family as the code it delimits, one size down and gray.
+    fence = {"infont", 18},
 }
 M.MDEDIT_TABLE_PAD_X = 8
 M.MDEDIT_TABLE_PAD_Y = 5
@@ -41,6 +47,7 @@ end
 function M.md_color(style)
     if style == "syntax" then return Blitbuffer.COLOR_WHITE end
     if style == "code" then return Blitbuffer.Color8(55) end
+    if style == "fence" then return Blitbuffer.Color8(130) end
     if style == "quote" then return Blitbuffer.Color8(95) end
     return Blitbuffer.COLOR_BLACK
 end

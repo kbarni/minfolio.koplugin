@@ -140,6 +140,27 @@ do
 end
 
 do
+    -- Block extent comes from MD.md_code_block, so the map reads a fence exactly
+    -- the way the editor lays one out. The local copy of the rule this replaced
+    -- matched only three backticks and let any later fence line close the block,
+    -- which split this document into a code node plus stray paragraphs here while
+    -- the editor showed one block.
+    local root = MapModel.parse_mindmap("````\n```lua\nx\n```\n````\nafter\n", "Doc")
+    check("parse_mindmap: a nested shorter fence does not close a longer one",
+        #root.children == 2 and root.children[1].kind == "code" and #root.children[1].raw == 5)
+    check("parse_mindmap: parsing resumes after the real closer",
+        root.children[2].kind == "paragraph" and root.children[2].text == "after")
+end
+
+do
+    -- Three raw lines, not two: split_text_lines yields a trailing empty line for
+    -- the final newline, and an unclosed fence runs to the end of the document.
+    local root = MapModel.parse_mindmap("```\nunterminated\n", "Doc")
+    check("parse_mindmap: an unclosed fence still becomes one code node running to the end",
+        #root.children == 1 and root.children[1].kind == "code" and #root.children[1].raw == 3)
+end
+
+do
     -- Previously "# H" was not recognized as a heading, so the list item that followed
     -- became its SIBLING at top level rather than its child. With MD.heading in place
     -- the heading is recognized, heading_level advances, and the item nests under it.

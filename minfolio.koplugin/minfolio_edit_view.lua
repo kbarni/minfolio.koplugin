@@ -321,7 +321,16 @@ function MDEdit:rebuild()
         local vr = visual_rows[vi]
         if vr.kind == "gap" then
             if used + vr.h > budget then break end
-            body[#body+1] = VerticalSpan:new{ width = vr.h }
+            if vr.code then
+                -- The pad row at a code block's top/bottom edge: same band as the
+                -- block's text rows, so the block reads as one shape rather than
+                -- rows of gray with white seams (computeVisualRows emits these,
+                -- and no ordinary paragraph gap, inside a block).
+                body[#body+1] = LineWidget:new{ background = C.EDIT.MDEDIT_CODE_GRAY,
+                    dimen = Geom:new{ w = text_w, h = vr.h } }
+            else
+                body[#body+1] = VerticalSpan:new{ width = vr.h }
+            end
             used = used + vr.h
             shown = shown + 1
         elseif vr.kind == "table_row" then
@@ -346,6 +355,14 @@ function MDEdit:rebuild()
             if used + rowh > budget then break end
             local slo, shi = self:lineSel(i)
             local args = { dimen = Geom:new{ w = text_w, h = rowh } }
+            -- Fenced code block band, drawn first so the highlight fill, the
+            -- selection and the text all land on top of it. Full text width, not
+            -- the row's own width: a code block is a rectangle, and a ragged
+            -- right edge following the code's indentation would read as noise.
+            if vr.block == "code" or vr.block == "code_fence" then
+                args[#args+1] = LineWidget:new{ background = C.EDIT.MDEDIT_CODE_GRAY,
+                    dimen = Geom:new{ w = text_w, h = rowh } }
+            end
             -- Persistent ==highlight== fill, drawn behind the text in every mode.
             -- Contiguous highlight segments are merged into one bar so word gaps
             -- don't leave hairline seams. (Selection, added next, paints on top.)

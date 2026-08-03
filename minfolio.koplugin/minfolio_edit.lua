@@ -590,6 +590,14 @@ function MDEdit:addChars(s)
     end
     self:queueVirtualChars(s)
 end
+-- Is a logical line inside a fenced code block (its fences included)? Computed
+-- from the live lines rather than read off the last layout: this answers an
+-- editing question, and the caller may be mid-keystroke on text the layout has
+-- not seen yet. It is one pass over the document, on Enter and on opening the
+-- Outline only -- both already do more work than that.
+function MDEdit:inCodeBlock(row)
+    return MD.md_code_map(self.lines)[row] ~= nil
+end
 function MDEdit:newline()
     self:flushTypeBuffer()
     self:snapshot(); self._burst = nil
@@ -603,7 +611,11 @@ function MDEdit:newline()
     -- never get assigned; PLAN.md §4/§6.3 calls this out as the most dangerous symbol in the
     -- file for exactly that reason). MD is a `require`d module, not an optional upvalue, so
     -- the guard is now dead weight and the call is unconditional.
-    do
+    --
+    -- Inside a fenced code block none of it applies: nothing there is Markdown, so
+    -- Enter after `- rm -rf /tmp/x` in a shell block owes the next line a bare
+    -- newline, not a bullet it would then have to be deleted out of.
+    if not self:inCodeBlock(self.crow) then
         local indent, kind, marker, task, body = MD.md_split_line_prefix(before)
         if (kind or task) and body == "" and after == "" then
             self.lines[self.crow] = indent
@@ -775,9 +787,13 @@ end
 function MDEdit:outlineItems()
     self:flushTypeBuffer()
     local items = {}
+    -- A '#' inside a fenced block is a comment in half the languages people
+    -- paste here, not a heading -- listing those would bury the real outline of
+    -- any document with a shell or Python block in it.
+    local code = MD.md_code_map(self.lines or {})
     for i, line in ipairs(self.lines or {}) do
         local hashes, text = MD.heading(line)
-        if hashes then
+        if hashes and not code[i] then
             local level = #hashes
             local indent = string.rep("  ", math.max(0, level - 1))
             local label = MD.md_trim(text)
