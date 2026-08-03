@@ -1,8 +1,8 @@
-# Minfolio Markdown Editor for Kindle
+# Minfolio Markdown Editor for Koreader
 
-**A simple, distraction-free Markdown editor and word processor for your Kindle.**
+**A simple, distraction-free Markdown editor and word processor for Koreader.**
 
-Minfolio turns a jailbroken Kindle into a comfortable writing device: weeks of battery, a glare-free
+Minfolio turns your e-reader into a comfortable writing device: weeks of battery, a glare-free
 e-ink screen, and nothing on it but your words. You type in plain Markdown and watch it style itself
 as you go, with headings, bold, italic, code, and lists rendered live while you write. Your work saves
 automatically as ordinary `.md` files you can sync anywhere.
@@ -31,14 +31,16 @@ automatically as ordinary `.md` files you can sync anywhere.
 - **Built-in notes browser** — open, create, and switch between notes without leaving the app.
 - **Edit with desktop** — pair with Minfolio Desktop on your local network for encrypted, Kindle-priority simultaneous editing.
 
-## Requirements
+## Usage
 
 Minfolio is built and tested on a **jailbroken Kindle Paperwhite 5**. It runs as a
-[KOReader](https://github.com/koreader/koreader) plugin launched from
-[KUAL](https://www.mobileread.com/forums/showthread.php?t=225030), so other KOReader-capable Kindles
-may work too, though only the Paperwhite 5 is tested.
+[KOReader](https://github.com/koreader/koreader) plugin,https://github.com/arthurrump/syncthing.koplugin launched fron the *Tools* menu.
 
-You will need a jailbroken Kindle with KOReader and KUAL already installed.
+For an optimal typing experience, it is recommended to use it with an external keyboard.
+On Kindle, use the excellent [Bluetooth-HID-Passthrough](https://github.com/zampierilucas/kindle-hid-passthrough) library to pair Bluetooth keyboards.
+
+You can also use [Syncthing](https://github.com/arthurrump/syncthing.koplugin) plugin to automatically sync your notes with your desktop computer.
+You can also use the *Desktop companion* app -> see below.
 
 ## Install
 
