@@ -6,7 +6,7 @@ Run these before publishing or tagging a release.
 device before every release: it glob-parse-checks every `minfolio.koplugin/*.lua`, runs the
 GGET lint (catches a moved/renamed symbol left behind as a silent global read — see
 `ARCHITECTURE.md` for what it does and does not catch), runs the off-device test suite
-(`*_test.lua`, currently the eight Tier 0 modules — 636 assertions), then transfers the
+(`*_test.lua`, currently the eight Tier 0 modules — 667 assertions), then transfers the
 plugin as one atomic operation, parse-checks it again on the device, and attempts a restart
 with a load-assertion check. Do not hand-duplicate that chain here; the two commands below
 are only for a quick, network-free local check of the same parse/test gates:
@@ -26,6 +26,10 @@ git status --short --ignored
 
 Before release:
 
+- Bump `M.VERSION` in `minfolio.koplugin/minfolio_const.lua` to the version being tagged, and
+  confirm `Help: About` in the palette shows it. Nothing derives this from the git tag, and
+  About is the only place a user can see which build they are running — a stale value there is
+  worse than none, because it is the first thing a bug report will quote.
 - Confirm `minfolio.koplugin/config.lua` is not tracked.
 - Confirm Dropbear/screensaver watchdog files are not tracked unless intentionally added as documented utilities.
 - Run `sh scripts/deploy.sh <host>` against a real Kindle and confirm every gate passes, including the on-device parse check and the load-assertion restart.
@@ -35,6 +39,8 @@ Before release:
   gate here can reach (see `ARCHITECTURE.md`, "What can and cannot be tested off-device"):
     - Opens from the hamburger button and, with a Bluetooth keyboard, from `Ctrl-P` — in
       both editing and reader mode.
+    - Opens **centred**, with equal margins left/right. With the on-screen keyboard already
+      up it shrinks and stays entirely above the keyboard rather than centring behind it.
     - Opens with **no on-screen keyboard summoned** and the full list scrollable. This is the
       one behaviour a touch-only user depends on entirely; a regression makes the palette
       unusable without a Bluetooth keyboard rather than merely worse.
