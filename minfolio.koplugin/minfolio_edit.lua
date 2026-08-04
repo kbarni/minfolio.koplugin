@@ -573,6 +573,25 @@ function MDEdit:selectAll()
     self.crow = #self.lines; self.ccol = #self.lines[#self.lines]
     self:refresh{ layout_dirty = false, selection = true, full = true }
 end
+-- The snapshot minfolio_menu_model's predicates run against (PALETTE_PLAN.md
+-- §4.2). Plain values only -- no methods, no widgets -- because that is what
+-- keeps every enable/hide/check rule a pure function the off-device suite can
+-- cover. It lives in this file rather than beside openPalette in
+-- minfolio_edit_view because md_clipboard is a file-local here.
+function MDEdit:paletteState()
+    return {
+        reader_mode = not not self.reader_mode,
+        remote = self.remote ~= nil,
+        has_selection = not not self:hasSel(),
+        can_undo = self._undo ~= nil and #self._undo > 0,
+        can_redo = self._redo ~= nil and #self._redo > 0,
+        has_clipboard = md_clipboard ~= nil and md_clipboard ~= "",
+        has_find_query = self._find_query ~= nil and self._find_query ~= "",
+        keyboard = self.keyboard ~= nil,
+        frontlight_on = (FL.bright or 0) > 0,
+        has_warmth = not not Frontlight.FL_HAS_AMBER,
+    }
+end
 function MDEdit:arrow(drow, dcol, m)  -- arrow key with optional Shift (select) / Alt-or-Command (word)
     self:flushTypeBuffer()
     local selecting = Keys.keymod(m, "Shift")

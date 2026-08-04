@@ -4,7 +4,14 @@
 -- and its dirty-region family (lineBand/cursorRowBand/changedLineRegions/
 -- the region* helpers), caret blink (caret/scheduleCaretBlink/
 -- pauseCaretBlinkForInput), and the top bar (buildTopBar/topBar/toolCell/
--- toolDivider/menuGlyph/runTopAction/openControls) and progress bar.
+-- toolDivider/menuGlyph/runTopAction/openPalette/showOutline) and progress bar.
+--
+-- `openControls` -- the hand-written 25-item Chrome.show_controls list -- was
+-- replaced here by `openPalette` (PALETTE_PLAN.md P1-2). The command set it used
+-- to spell out inline now lives in minfolio_menu_model (Tier 0, tested), and
+-- minfolio_palette renders it. `showOutline` is new only in the sense that the
+-- outline used to be a `sub_item_table_func` inside that list, which a flat
+-- palette has no equivalent for.
 --
 -- Mixin shape (PLAN.md §6.2): `local MDEdit = {}` below is a local proxy
 -- table, not the real editor class -- see minfolio_edit_layout.lua's header
@@ -37,12 +44,19 @@ local IconWidget = require("ui/widget/iconwidget")
 local Font = require("ui/font")
 local Blitbuffer = require("ffi/blitbuffer")
 local UIManager = require("ui/uimanager")
+local Menu = require("ui/widget/menu")
+local _ = require("gettext")
 
 local Text = require("minfolio_text")
 local IO = require("minfolio_io")
 local Style = require("minfolio_style")
 local C = require("minfolio_const")
 local Chrome = require("minfolio_chrome")
+-- Named for the module, not its FL state table, deliberately: minfolio_edit.lua
+-- binds `FL` to Frontlight.FL, and the two files are halves of one class -- the
+-- same short name meaning two different tables across them is a trap.
+local Frontlight = require("minfolio_frontlight")
+local Palette = require("minfolio_palette")
 
 local MDEdit = {}
 -- a thin caret bar that sits between styled spans without disturbing them
@@ -791,9 +805,35 @@ function MDEdit:runTopAction(name)
         self._find_bar_visible = nil
         self._topbar_cache = nil
         self:refresh{ layout_dirty = false, full = true }
-    elseif name == "menu" then self:openControls()
+    elseif name == "menu" then self:openPalette()
     elseif name == "edit" then self:setReaderMode(false)
-    elseif self.reader_mode and name == "close" then self:saveAndClose()
+    -- Everything from here to the reader-mode guard below works in BOTH modes.
+    -- The guard swallows every branch after it while reading, so a command the
+    -- palette offers in reader mode has to be dispatched above it or it silently
+    -- does nothing -- minfolio_menu_model's `mode = "edit"` field and this
+    -- boundary are two halves of one decision and must agree.
+    --
+    -- `close` was previously handled twice, once on each side of the guard, with
+    -- identical bodies; hoisting it here and deleting the lower copy changes no
+    -- behaviour.
+    elseif name == "close" then self:saveAndClose()
+    elseif name == "save" then if self:save() then Chrome.notify(_("Saved")) end
+    elseif name == "open_markdown" then self:saveAndOpenMarkdown()
+    elseif name == "outline" then self:showOutline()
+    elseif name == "word_count" then self:showWordCount()
+    elseif name == "toggle_reader" then self:setReaderMode(not self.reader_mode)
+    elseif name == "rotate" then Chrome.rotate_screen_ccw()
+    elseif name == "brightness_up" then Frontlight.fl_adjust(Frontlight.FL_STEP, 0)
+    elseif name == "brightness_down" then Frontlight.fl_adjust(-Frontlight.FL_STEP, 0)
+    elseif name == "warmth_up" then Frontlight.fl_adjust(0, Frontlight.FL_AMBER_STEP)
+    elseif name == "warmth_down" then Frontlight.fl_adjust(0, -Frontlight.FL_AMBER_STEP)
+    elseif name == "toggle_frontlight" then Frontlight.toggle_light()
+    -- Text size is mode-independent: bumpScale touches no caret and no
+    -- selection, and resizing text is exactly what a reader wants. It used to
+    -- sit below the guard, where reader mode could not reach it; the palette
+    -- offers it in both modes, so it moves above.
+    elseif name == "smaller" then self:bumpScale(-0.1)
+    elseif name == "larger" then self:bumpScale(0.1)
     elseif self.reader_mode then return
     elseif name == "header" then self:fmtHeader()
     elseif name == "bold" then self:fmtWrap("**")
@@ -804,56 +844,87 @@ function MDEdit:runTopAction(name)
     elseif name == "mindmap" then self:openMindmap()
     elseif name == "reader" then self:setReaderMode(true)
     elseif name == "table" then self:insertTable()
-    elseif name == "smaller" then self:bumpScale(-0.1)
-    elseif name == "larger" then self:bumpScale(0.1)
-    elseif name == "close" then self:saveAndClose()
+    -- Edit-only additions. `smaller`/`larger`/`close` used to be here too and
+    -- are now above the guard; there is no second copy.
+    elseif name == "code" then self:fmtWrap("`")
+    elseif name == "undo" then self:undo()
+    elseif name == "redo" then self:redo()
+    elseif name == "copy" then self:copy()
+    elseif name == "cut" then self:cut()
+    elseif name == "paste" then self:paste()
+    elseif name == "select_all" then self:selectAll()
+    elseif name == "replace" then self:openReplaceDialog()
+    elseif name == "toggle_keyboard" then
+        if self.keyboard then self:hideKeyboard() else self:showKeyboard() end
     end
 end
-function MDEdit:openControls()
-    if self.reader_mode then
-        Chrome.show_controls({
-            { text = "Find...", callback = function() self:openFindDialog() end },
-            { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
-            { text = "Word count", callback = function() self:showWordCount() end },
-            { text = "Exit reader mode", callback = function() self:setReaderMode(false) end },
-            { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
-            { text = "Save & close note", callback = function() self:saveAndClose() end },
-        })
-        return
+-- Replaces the hand-written openControls list (PALETTE_PLAN.md P1-2). Every
+-- command it used to build now comes from minfolio_menu_model, which is also
+-- what decides -- testably -- which are visible, greyed and ticked here.
+--
+-- The is_always_active handover is not optional. This editor keeps that flag so
+-- it can own the keyboard while a note is open; leaving it set while a widget
+-- sits on top means every key pressed to drive that widget is ALSO typed into
+-- the document underneath. showInfo and openFindDialog make the same trade for
+-- the same reason (see showInfo's comment). openControls never did, because a
+-- touch-only popup was never driven by the keyboard -- the palette is, from
+-- P1-3 onward, so it has to.
+function MDEdit:openPalette()
+    self:flushTypeBuffer()
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self.is_always_active = true
     end
-    local keyboard_item
-    if self.keyboard then
-        keyboard_item = { text = "Hide keyboard", callback = function() self:hideKeyboard() end }
-    else
-        keyboard_item = { text = "Show keyboard", callback = function() self:showKeyboard() end }
+    -- Leave room for the on-screen keyboard when one is up, rather than opening a
+    -- tall dialog with two visible rows behind it (PALETTE_PLAN.md §5.3).
+    local max_height
+    if self.keyboard and self.keyboard.dimen and self.keyboard.dimen.h then
+        max_height = math.max(200, self.fh - self.keyboard.dimen.h - 20)
     end
-    Chrome.show_controls({
-        { text = "Find...", callback = function() self:openFindDialog() end },
-        { text = "Find and replace...", callback = function() self:openReplaceDialog() end },
-        { text = "Outline", sub_item_table_func = function() return self:outlineItems() end },
-        { text = "Word count", callback = function() self:showWordCount() end },
-        { text = "Mindmap mode", callback = function() self:openMindmap() end },
-        { text = "Reader mode", callback = function() self:setReaderMode(true) end },
-        keyboard_item,
-        { text = "Heading", callback = function() self:fmtHeader() end },
-        { text = "Bold", callback = function() self:fmtWrap("**") end },
-        { text = "Italic", callback = function() self:fmtWrap("*") end },
-        { text = "List item", callback = function() self:fmtList() end },
-        { text = "Numbered list", callback = function() self:fmtOrdered() end },
-        { text = "Checkbox", callback = function() self:fmtTask() end },
-        { text = "Table", callback = function() self:insertTable() end },
-        { text = "Text size +", callback = function() self:bumpScale(0.1) end },
-        { text = "Text size -", callback = function() self:bumpScale(-0.1) end },
-        { text = "Select all", callback = function() self:selectAll() end },
-        { text = "Copy",  callback = function() self:copy() end },
-        { text = "Cut",   callback = function() self:cut() end },
-        { text = "Paste", callback = function() self:paste() end },
-        { text = "Undo",  callback = function() self:undo() end },
-        { text = "Redo",  callback = function() self:redo() end },
-        { text = "⟲ Rotate screen", callback = function() Chrome.rotate_screen_ccw() end },
-        { text = "Open .md file...", callback = function() self:saveAndOpenMarkdown() end },
-        { text = "Save & close note", callback = function() self:saveAndClose() end },
-    })
+    self.is_always_active = false
+    Palette.show{
+        state = self:paletteState(),
+        max_height = max_height,
+        on_select = function(action) self:runTopAction(action) end,
+        on_close = restore_focus,
+    }
+end
+-- Was a `sub_item_table_func` inside openControls, which the flat palette has no
+-- equivalent for. outlineItems already returns Menu-shaped entries carrying
+-- their own callbacks (including a dimmed "No headings" placeholder), so this
+-- only has to put them on screen.
+function MDEdit:showOutline()
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self.is_always_active = true
+    end
+    local menu
+    menu = Menu:new{
+        title = _("Outline"),
+        item_table = self:outlineItems(),
+        is_popout = true,
+        width = math.floor(Screen:getWidth() * 0.9),
+        height = math.floor(Screen:getHeight() * 0.8),
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)   -- fires onCloseWidget below, hence restore_focus
+            if item and item.callback then UIManager:scheduleIn(0.01, item.callback) end
+            return true
+        end,
+    }
+    -- onCloseWidget, not close_callback: see the same note in minfolio_palette.
+    -- close_callback misses every route out except Back and the close icon, and
+    -- missing one strands is_always_active off for the rest of the session.
+    local original_close_widget = menu.onCloseWidget
+    function menu:onCloseWidget()
+        if original_close_widget then original_close_widget(self) end
+        restore_focus()
+    end
+    self.is_always_active = false
+    UIManager:show(menu)
 end
 
 return { methods = MDEdit }
