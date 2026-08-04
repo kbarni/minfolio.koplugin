@@ -73,6 +73,69 @@ function M.md_inline(text, hl)
     return spans
 end
 
+-- The blockquote markers at the head of a line. Returns prefix, depth, rest --
+-- or nil when the line is not quoted.
+--
+-- A loop rather than a pattern because Lua patterns have no repeated capture:
+-- "^((>%s?)+)" does not mean what it looks like, and "^>%s?" alone reads only
+-- the first level, which is how "> > text" used to render as a quote containing
+-- a literal "> ".
+--
+-- The prefix is returned whole and verbatim, both markers and the spaces between
+-- them, because the tokenizer emits it as ONE hidden span. Every byte of the
+-- source line has to be inside some span or the editor's byte<->x mapping
+-- (rowXAt, colAtX, a row's `sb`) drifts by however many bytes were dropped, and
+-- the caret lands in the wrong place.
+--
+-- Depth is uncapped here. Clamping belongs to whatever renders the indent, not
+-- to the reading of the document.
+function M.md_quote_prefix(line)
+    line = tostring(line or "")
+    local pos, depth = 1, 0
+    while true do
+        local _, stop = line:find("^>%s?", pos)
+        if not stop then break end
+        depth = depth + 1
+        pos = stop + 1
+    end
+    if depth == 0 then return nil end
+    return line:sub(1, pos - 1), depth, line:sub(pos)
+end
+
+-- A thematic break -- the horizontal rule (CommonMark 4.1). Returns the marker
+-- character and how many of it, or nil.
+--
+-- Three or more of `-`, `*` or `_`, all the same character, with any amount of
+-- space or tab between and after them, and up to three leading spaces. So "---",
+-- "***", "___", "- - -" and "   ---   " are all rules; "--", "-*-" and "--- x"
+-- are not.
+--
+-- This is checked BEFORE the list-item branch in md_tokenize, which is the
+-- precedence CommonMark specifies and not merely a convenience: "- - -" matches
+-- the bullet pattern too, and whichever branch runs first decides. Reading it as
+-- a list produced a bullet whose text was "- -", which is nobody's intent.
+--
+-- Table separators ("|---|---|") start with a pipe and never reach here, and a
+-- fence is backticks or tildes, so neither construct is at risk from this.
+function M.md_thematic_break(line)
+    line = tostring(line or "")
+    local indent, rest = line:match("^( *)(.*)$")
+    if #indent > 3 then return nil end
+    local ch = rest:sub(1, 1)
+    if ch ~= "-" and ch ~= "*" and ch ~= "_" then return nil end
+    local count = 0
+    for i = 1, #rest do
+        local c = rest:sub(i, i)
+        if c == ch then
+            count = count + 1
+        elseif c ~= " " and c ~= "\t" then
+            return nil
+        end
+    end
+    if count < 3 then return nil end
+    return ch, count
+end
+
 function M.md_tokenize(textstr)
     local lines = {}
     local function with_prefix(prefix, rest, block, display, style)
@@ -97,6 +160,12 @@ function M.md_tokenize(textstr)
         elseif marker then
             fence = marker
             lines[#lines+1] = M.md_code_token(line, true)
+        elseif M.md_thematic_break(line) then
+            -- The whole line is one hidden span. Nothing of it renders (the rule
+            -- is drawn by the view), but every byte stays inside a span so the
+            -- caret can still be placed on the line and the rule deleted --
+            -- exactly how a heading's "# " and a quote's "> " are handled.
+            lines[#lines+1] = { block = "hr", spans = {{ text = line, style = "syntax", display = "" }} }
         else
             local hashes, hrest = line:match("^(#+%s+)(.*)$")
             if hashes then
@@ -137,9 +206,14 @@ function M.md_tokenize(textstr)
                         tok.indent_ws = task:match("^%s*") or ""
                         lines[#lines+1] = tok
                     else
-                        if line:match("^>%s?") then
-                            pre, rest = line:match("^(>%s?)(.*)$")
-                            lines[#lines+1] = with_prefix(pre, rest, "quote", "", "syntax")
+                        local qpre, qdepth, qrest = M.md_quote_prefix(line)
+                        if qpre then
+                            -- quote_depth is what the renderer indents by and how
+                            -- many rules it draws; the markers themselves stay
+                            -- hidden (display = "") like every other syntax span.
+                            local tok = with_prefix(qpre, qrest, "quote", "", "syntax")
+                            tok.quote_depth = qdepth
+                            lines[#lines+1] = tok
                         else
                             lines[#lines+1] = { block = "normal", spans = M.md_inline(line) }
                         end
@@ -395,6 +469,62 @@ function M.md_split_line_prefix(line)
     local task, task_body = body:match("^(%[[ xX]%]%s+)(.*)$")
     if task then body = task_body end
     return indent or "", kind, marker, task, body
+end
+
+-- What pressing Enter at byte column `col` of `line` owes the document.
+-- Returns EITHER a prefix for the new line (`prefix, nil`) OR a replacement for
+-- the current one (`nil, reset`) when the construct being continued is empty and
+-- Enter should end it instead of extending it.
+--
+-- Lifted out of MDEdit:newline (Tier 4, untestable here) when blockquotes joined
+-- lists as a continuable construct, per CLAUDE.md's rule that logic which can be
+-- pure should be: this is the one function in the plugin that decides what a
+-- keystroke writes into the document, it already shipped one bug of that kind
+-- (continuing "1) first" handed back "2. ", switching delimiter mid-list), and
+-- every rule below is a pure function of a line and a column.
+--
+-- The two ending rules, both "one Enter peels one construct":
+--   "- "     -> ""      an empty list item ends the list, keeping the indent
+--   "> - "   -> "> "    ...and inside a quote it ends the list, not the quote
+--   "> "     -> ""      an empty quoted line then ends the quote
+--
+-- The quote prefix is read from the WHOLE line but only carried when the caret
+-- sits past it. Splitting a line from inside its own "> " must not hand the new
+-- line a second copy of the marker -- there, the split is just a split.
+--
+-- Everything carried is carried VERBATIM: "> ", ">> " and "> > " each continue
+-- in the spelling the author used, and an ordered list keeps its own delimiter.
+-- Normalising here would rewrite the author's file as a side effect of pressing
+-- Enter.
+function M.md_line_continuation(line, col)
+    line = tostring(line or "")
+    col = math.max(0, math.min(#line, math.floor(tonumber(col) or #line)))
+    local before, after = line:sub(1, col), line:sub(col + 1)
+
+    local quote = ""
+    local qpre = M.md_quote_prefix(line)
+    if qpre and col >= #qpre then quote = qpre end
+
+    local indent, kind, marker, task, body = M.md_split_line_prefix(before:sub(#quote + 1))
+    if (kind or task) and body == "" and after == "" then
+        return nil, quote .. indent
+    end
+    if quote ~= "" and before == quote and after == "" then
+        return nil, ""
+    end
+
+    local prefix = quote
+    if kind == "ordered" then
+        local n = tonumber((marker or ""):match("^(%d+)")) or 1
+        local delim = (marker or ""):match("^%d+([%.%)])") or "."
+        prefix = quote .. indent .. tostring(n + 1) .. delim .. " "
+    elseif kind == "bullet" then
+        prefix = quote .. indent .. (marker or "- ")
+    elseif task then
+        prefix = quote .. indent
+    end
+    if task then prefix = prefix .. "[ ] " end
+    return prefix, nil
 end
 
 return M

@@ -330,6 +330,25 @@ function MDEdit:rebuild()
     end
     self.row_map = {}
     self.caret_region = nil
+    -- One vertical rule per blockquote level, each at the left edge of the step
+    -- its own level indents by, so nesting reads as a stack of rules rather than
+    -- one thicker one. Returns an OverlapGroup layer to drop into whatever is
+    -- being drawn, or nil when the row is not quoted.
+    local function quote_rules(depth, h)
+        if not depth or depth < 1 or h < 1 then return nil end
+        local levels = math.min(depth, C.EDIT.MDEDIT_QUOTE_MAX_DEPTH)
+        local layer = OverlapGroup:new{ dimen = Geom:new{ w = text_w, h = h } }
+        for level = 1, levels do
+            -- quoteIndent(level) is the inset of the text at that level; the rule
+            -- sits at the START of that level's step, one step to its left.
+            local x = self:quoteIndent(level) - self:quoteIndent(1)
+            layer[#layer+1] = HorizontalGroup:new{ align = "top",
+                HorizontalSpan:new{ width = x },
+                LineWidget:new{ background = C.EDIT.MDEDIT_QUOTE_GRAY,
+                    dimen = Geom:new{ w = C.EDIT.MDEDIT_QUOTE_RULE_W, h = h } } }
+        end
+        return layer
+    end
     local ytop, used, shown = editor_top, 0, 0
     for vi = self.vtop, #visual_rows do
         local vr = visual_rows[vi]
@@ -343,7 +362,7 @@ function MDEdit:rebuild()
                 body[#body+1] = LineWidget:new{ background = C.EDIT.MDEDIT_CODE_GRAY,
                     dimen = Geom:new{ w = text_w, h = vr.h } }
             else
-                body[#body+1] = VerticalSpan:new{ width = vr.h }
+                body[#body+1] = quote_rules(vr.quote, vr.h) or VerticalSpan:new{ width = vr.h }
             end
             used = used + vr.h
             shown = shown + 1
@@ -376,6 +395,23 @@ function MDEdit:rebuild()
             if vr.block == "code" or vr.block == "code_fence" then
                 args[#args+1] = LineWidget:new{ background = C.EDIT.MDEDIT_CODE_GRAY,
                     dimen = Geom:new{ w = text_w, h = rowh } }
+            end
+            -- Blockquote rules, at the same depth as this row's layout indent.
+            -- Full row height, so consecutive rows join into one unbroken line
+            -- (the gap rows above carry it across the paragraph gaps).
+            local rules = quote_rules(vr.quote, rowh)
+            if rules then args[#args+1] = rules end
+            -- A `---` line: the markers render as nothing (md_tokenize hides
+            -- them), so the row would otherwise be blank. The rule is centred in
+            -- the row rather than drawn at the text baseline, because it stands
+            -- for the whole line and not for any glyph on it.
+            if vr.block == "hr" then
+                local hr_h = math.min(C.EDIT.MDEDIT_HR_H, rowh)
+                args[#args+1] = VerticalGroup:new{
+                    VerticalSpan:new{ width = math.max(0, math.floor((rowh - hr_h) / 2)) },
+                    LineWidget:new{ background = C.EDIT.MDEDIT_HR_GRAY,
+                        dimen = Geom:new{ w = text_w, h = hr_h } },
+                }
             end
             -- Persistent ==highlight== fill, drawn behind the text in every mode.
             -- Contiguous highlight segments are merged into one bar so word gaps

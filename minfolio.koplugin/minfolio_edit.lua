@@ -711,36 +711,26 @@ function MDEdit:newline()
     local l = self.lines[self.crow]
     local before, after = l:sub(1, self.ccol), l:sub(self.ccol+1)
     local prefix = ""
-    -- md_split_line_prefix now lives in minfolio_md.lua and is always present (this was
-    -- previously a nil-tolerant guard on a forward-declared local that could, in principle,
-    -- never get assigned; PLAN.md §4/§6.3 calls this out as the most dangerous symbol in the
-    -- file for exactly that reason). MD is a `require`d module, not an optional upvalue, so
-    -- the guard is now dead weight and the call is unconditional.
-    --
-    -- Inside a fenced code block none of it applies: nothing there is Markdown, so
-    -- Enter after `- rm -rf /tmp/x` in a shell block owes the next line a bare
+    -- Inside a fenced code block none of this applies: nothing there is Markdown,
+    -- so Enter after `- rm -rf /tmp/x` in a shell block owes the next line a bare
     -- newline, not a bullet it would then have to be deleted out of.
     if not self:inCodeBlock(self.crow) then
-        local indent, kind, marker, task, body = MD.md_split_line_prefix(before)
-        if (kind or task) and body == "" and after == "" then
-            self.lines[self.crow] = indent
-            self.ccol = #indent
+        -- Every rule about what the next line inherits -- list markers, task
+        -- boxes, blockquote markers, and which of them an Enter on an empty one
+        -- ends -- lives in MD.md_line_continuation, which is pure and tested.
+        -- It used to be spelled out here, where nothing could check it.
+        --
+        -- `reset` is a REPLACEMENT for the current line and is very often the
+        -- empty string, which is truthy in Lua. `if reset then` is therefore the
+        -- correct test and `reset ~= ""` would be a bug: ending a quote is
+        -- exactly the case that resets to "".
+        local continuation, reset = MD.md_line_continuation(l, self.ccol)
+        if reset then
+            self.lines[self.crow] = reset
+            self.ccol = #reset
             return self:refresh()
         end
-        if kind == "ordered" then
-            local n = tonumber((marker or ""):match("^(%d+)")) or 1
-            -- Carry the source line's own delimiter instead of hardcoding ".",
-            -- now that md_split_line_prefix recognises "1)" as ordered too:
-            -- continuing "1) first" used to hand back "2. ", switching delimiter
-            -- mid-list on the user.
-            local delim = (marker or ""):match("^%d+([%.%)])") or "."
-            prefix = indent .. tostring(n + 1) .. delim .. " "
-        elseif kind == "bullet" then
-            prefix = indent .. (marker or "- ")
-        elseif task then
-            prefix = indent
-        end
-        if task then prefix = prefix .. "[ ] " end
+        prefix = continuation or ""
     end
     table.insert(self.lines, self.crow+1, prefix .. after)
     self.lines[self.crow] = before

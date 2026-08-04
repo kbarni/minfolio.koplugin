@@ -214,6 +214,133 @@ do
     check("quote: '>' with no following space is still a quote (pattern is '>%s?')", lines[1].block == "quote")
 end
 
+do
+    -- md_quote_prefix: the depth reading the renderer indents and draws rules by.
+    local pre, depth, rest = MD.md_quote_prefix("> quoted")
+    check("quote_prefix: one level", pre == "> " and depth == 1 and rest == "quoted")
+
+    pre, depth, rest = MD.md_quote_prefix(">tight")
+    check("quote_prefix: a marker with no space still counts", pre == ">" and depth == 1 and rest == "tight")
+
+    -- Both spellings of nesting. "> > " is the conventional one; ">>" is what a
+    -- mail client emits. They mean the same thing and must read the same.
+    pre, depth, rest = MD.md_quote_prefix("> > deep")
+    check("quote_prefix: spaced nesting reads as depth 2",
+        pre == "> > " and depth == 2 and rest == "deep")
+    pre, depth, rest = MD.md_quote_prefix(">> deep")
+    check("quote_prefix: tight nesting reads as depth 2",
+        pre == ">> " and depth == 2 and rest == "deep")
+
+    pre, depth, rest = MD.md_quote_prefix(">>>>> very deep")
+    check("quote_prefix: depth is uncapped here -- clamping is the renderer's job",
+        depth == 5 and rest == "very deep")
+
+    check("quote_prefix: a plain line is not a quote", MD.md_quote_prefix("not quoted") == nil)
+    check("quote_prefix: a quote marker mid-line does not count",
+        MD.md_quote_prefix("text > more") == nil)
+    check("quote_prefix: nil is tolerated", MD.md_quote_prefix(nil) == nil)
+
+    -- An empty quoted line is a real thing (the blank line inside a multi-line
+    -- quote), and must not read as unquoted or the rule breaks there.
+    pre, depth, rest = MD.md_quote_prefix(">")
+    check("quote_prefix: a bare marker is a quote with empty content",
+        pre == ">" and depth == 1 and rest == "")
+end
+
+do
+    -- The prefix must cover every byte it consumed. The editor maps byte columns
+    -- to x through the spans, so a prefix that under-reports its own length puts
+    -- the caret in the wrong place on every quoted line.
+    for _, line in ipairs({ "> quoted", ">tight", "> > deep", ">> deep", ">" }) do
+        local pre, _, rest = MD.md_quote_prefix(line)
+        check("quote_prefix: prefix .. rest reconstructs " .. string.format("%q", line),
+            pre .. rest == line)
+    end
+end
+
+do
+    local lines = MD.md_tokenize("> > nested")
+    check("quote: nesting is one hidden span, not a literal '>' in the text",
+        lines[1].spans[1].text == "> > " and lines[1].spans[1].display == "")
+    check("quote: quote_depth is carried on the token", lines[1].quote_depth == 2)
+    local body = ""
+    for i = 2, #lines[1].spans do body = body .. lines[1].spans[i].text end
+    check("quote: the body is the text after every marker", body == "nested")
+end
+
+do
+    local lines = MD.md_tokenize("> quoted")
+    check("quote: a single level reports depth 1", lines[1].quote_depth == 1)
+    check("quote: an unquoted line carries no depth",
+        MD.md_tokenize("plain")[1].quote_depth == nil)
+end
+
+do
+    -- Inline styling still applies inside a quote -- the markers are stripped,
+    -- not the Markdown after them.
+    local spans = MD.md_tokenize("> **bold** in a quote")[1].spans
+    local styles = {}
+    for _, s in ipairs(spans) do styles[s.style] = true end
+    check("quote: inline markup inside a quote is still parsed", styles.bold == true)
+end
+
+-- ---------------------------------------------------------------------------
+-- md_thematic_break: the horizontal rule
+-- ---------------------------------------------------------------------------
+
+do
+    check("hr: three dashes", MD.md_thematic_break("---") == "-")
+    check("hr: three asterisks", MD.md_thematic_break("***") == "*")
+    check("hr: three underscores", MD.md_thematic_break("___") == "_")
+    check("hr: more than three is still a rule", MD.md_thematic_break("--------") == "-")
+    local ch, count = MD.md_thematic_break("-----")
+    check("hr: the count is reported", ch == "-" and count == 5)
+end
+
+do
+    -- CommonMark allows spaces between and after the markers, and up to three
+    -- leading ones.
+    check("hr: spaces between the markers", MD.md_thematic_break("- - -") == "-")
+    check("hr: trailing whitespace", MD.md_thematic_break("---   ") == "-")
+    check("hr: up to three leading spaces", MD.md_thematic_break("   ---") == "-")
+    check("hr: four leading spaces is not a rule", MD.md_thematic_break("    ---") == nil)
+    check("hr: a tab between markers is allowed", MD.md_thematic_break("-\t-\t-") == "-")
+end
+
+do
+    check("hr: two dashes are not a rule", MD.md_thematic_break("--") == nil)
+    check("hr: mixed markers are not a rule", MD.md_thematic_break("-*-") == nil)
+    check("hr: trailing text disqualifies it", MD.md_thematic_break("--- x") == nil)
+    check("hr: an empty line is not a rule", MD.md_thematic_break("") == nil)
+    check("hr: nil is tolerated", MD.md_thematic_break(nil) == nil)
+    -- The two constructs that also use these characters and must survive.
+    check("hr: a table separator row is not a rule", MD.md_thematic_break("|---|---|") == nil)
+    check("hr: a bullet item is not a rule", MD.md_thematic_break("- item") == nil)
+end
+
+do
+    local tok = MD.md_tokenize("---")[1]
+    check("hr: tokenizes to block 'hr'", tok.block == "hr")
+    check("hr: the whole line is one hidden span -- byte math has to stay intact",
+        #tok.spans == 1 and tok.spans[1].text == "---" and tok.spans[1].display == "")
+end
+
+do
+    -- Precedence. "- - -" matches the bullet pattern too; the thematic-break
+    -- check runs first, exactly as CommonMark specifies. Read as a list it
+    -- produced a bullet whose text was "- -".
+    check("hr: '- - -' is a rule, not a bullet", MD.md_tokenize("- - -")[1].block == "hr")
+    check("hr: '- item' is still a bullet", MD.md_tokenize("- item")[1].block == "bullet")
+    check("hr: '***' is a rule, not stray emphasis markers",
+        MD.md_tokenize("***")[1].block == "hr")
+end
+
+do
+    -- Inside a fence, nothing parses -- including this.
+    local lines = MD.md_tokenize("```\n---\n```")
+    check("hr: a rule inside a fenced block stays code", lines[2].block ~= "hr")
+end
+
 -- ---------------------------------------------------------------------------
 -- Fenced code blocks: md_fence, md_fence_closes, md_code_block, md_code_map,
 -- md_code_token, and md_tokenize's fence state
@@ -602,6 +729,114 @@ do
     local twice = MD.md_toggle_task(once)
     check("md_toggle_task: toggling twice restores everything but the box case",
         twice == "  * [x]   Ship it   " and once == "  * [ ]   Ship it   ")
+end
+
+-- ---------------------------------------------------------------------------
+-- md_line_continuation -- what Enter writes. Lifted out of MDEdit:newline, so
+-- the list cases below are REGRESSION cover for behaviour that already shipped,
+-- not new ground.
+-- ---------------------------------------------------------------------------
+
+-- Enter at the end of the line, the overwhelmingly common case.
+local function cont(line)
+    return MD.md_line_continuation(line, #line)
+end
+
+do
+    check("continuation: a plain paragraph inherits nothing", cont("just text") == "")
+    check("continuation: a bullet repeats its own marker", cont("- item") == "- ")
+    check("continuation: the marker character is carried, not normalised",
+        cont("* item") == "* " and cont("+ item") == "+ ")
+    check("continuation: a nested bullet keeps its indent", cont("    - item") == "    - ")
+end
+
+do
+    check("continuation: an ordered item increments", cont("3. third") == "4. ")
+    -- The bug this function was extracted partly to protect: "1)" used to
+    -- continue as "2.", switching the author's delimiter mid-list.
+    check("continuation: an ordered item keeps its own delimiter", cont("3) third") == "4) ")
+    check("continuation: an indented ordered item keeps its indent",
+        cont("  10. tenth") == "  11. ")
+end
+
+do
+    check("continuation: a task carries an UNticked box, whatever the source was",
+        cont("[ ] todo") == "[ ] " and cont("[x] done") == "[ ] ")
+    check("continuation: a bulleted task carries both marker and box",
+        cont("- [x] done") == "- [ ] ")
+end
+
+do
+    -- An empty construct ends rather than extends. `reset` replaces the current
+    -- line; it is frequently "" and "" is truthy in Lua, which is what makes
+    -- `if reset then` the correct test at the call site.
+    local prefix, reset = cont("- ")
+    check("continuation: an empty bullet ends the list", prefix == nil and reset == "")
+    prefix, reset = cont("    - ")
+    check("continuation: ending a nested list keeps the indent", prefix == nil and reset == "    ")
+    prefix, reset = cont("1. ")
+    check("continuation: an empty ordered item ends the list", prefix == nil and reset == "")
+    prefix, reset = cont("- [ ] ")
+    check("continuation: an empty task ends the list", prefix == nil and reset == "")
+end
+
+do
+    -- Blockquotes, the reason this exists.
+    check("continuation: a quoted line stays quoted", cont("> quoted") == "> ")
+    check("continuation: the quote spelling is carried verbatim",
+        cont(">> deep") == ">> " and cont("> > deep") == "> > " and cont(">tight") == ">")
+    check("continuation: a bullet inside a quote carries both",
+        cont("> - item") == "> - ")
+    check("continuation: an ordered item inside a quote increments inside the quote",
+        cont("> 2. second") == "> 3. ")
+    check("continuation: a task inside a quote carries the box",
+        cont("> [x] done") == "> [ ] ")
+end
+
+do
+    -- One Enter peels one construct: the list first, then the quote.
+    local prefix, reset = cont("> - ")
+    check("continuation: an empty bullet inside a quote ends the list, not the quote",
+        prefix == nil and reset == "> ")
+    prefix, reset = cont("> ")
+    check("continuation: an empty quoted line then ends the quote",
+        prefix == nil and reset == "")
+    prefix, reset = cont(">> ")
+    check("continuation: ending a nested quote clears the whole prefix",
+        prefix == nil and reset == "")
+end
+
+do
+    -- Splitting mid-line. The new line inherits the prefix and takes the tail.
+    check("continuation: splitting a quote mid-text still quotes the new line",
+        MD.md_line_continuation("> hello world", 8) == "> ")
+    check("continuation: splitting a bullet mid-text still bullets the new line",
+        MD.md_line_continuation("- hello world", 8) == "- ")
+    -- A caret INSIDE the "> " is not past the marker, so the split is just a
+    -- split -- carrying the prefix there would hand the new line a second copy.
+    check("continuation: a caret inside the quote marker carries nothing",
+        MD.md_line_continuation("> text", 1) == "")
+    check("continuation: Enter at column 0 pushes the line down unchanged",
+        MD.md_line_continuation("> text", 0) == "")
+    check("continuation: Enter at column 0 of a bullet carries nothing",
+        MD.md_line_continuation("- item", 0) == "")
+end
+
+do
+    -- An empty construct with text after the caret is being SPLIT, not ended --
+    -- the reset rules require nothing after the caret.
+    check("continuation: '- ' with text after the caret continues instead of ending",
+        MD.md_line_continuation("- item", 2) == "- ")
+    check("continuation: '> ' with text after the caret continues instead of ending",
+        MD.md_line_continuation("> text", 2) == "> ")
+end
+
+do
+    check("continuation: an out-of-range column is clamped, not an error",
+        MD.md_line_continuation("- item", 999) == "- ")
+    check("continuation: a negative column is clamped to the start",
+        MD.md_line_continuation("- item", -5) == "")
+    check("continuation: nil line and column are tolerated", MD.md_line_continuation(nil, nil) == "")
 end
 
 print(string.format("%d passed, %d failed", passed, failed))

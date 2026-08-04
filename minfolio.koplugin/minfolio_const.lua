@@ -96,6 +96,29 @@ M.EDIT = {
     -- has to stay quiet under monospace text on e-ink.
     MDEDIT_CODE_GRAY = Blitbuffer.Color8(228),
     MDEDIT_CODE_PAD = 8,
+    -- Blockquote: per-level indent, and the vertical rule drawn at the left of
+    -- every quoted row. The indent is scaled by the editor's text scale at use
+    -- (see MDEdit:quoteIndent) so a quote keeps its proportions as the text size
+    -- changes; the rule's width and colour do not, because a hairline is a
+    -- hairline at any text size.
+    --
+    -- MDEDIT_QUOTE_INDENT is the whole step, rule included: the rule occupies the
+    -- first MDEDIT_QUOTE_RULE_W of it and the rest is the gap before the text, so
+    -- nesting one level deeper moves both by exactly one step.
+    MDEDIT_QUOTE_INDENT = 22,
+    MDEDIT_QUOTE_RULE_W = 4,
+    -- Dark enough to read as a deliberate rule on e-ink rather than a smudge,
+    -- light enough not to compete with the black text beside it.
+    MDEDIT_QUOTE_GRAY = Blitbuffer.Color8(120),
+    -- Indent stops growing past this many levels. Markdown puts no limit on
+    -- nesting, but a screen does: without a clamp, a deeply quoted mail thread
+    -- would indent its text off the right edge and wrap every word.
+    MDEDIT_QUOTE_MAX_DEPTH = 4,
+    -- Horizontal rule (`---`). Full text width, centred in its own row. Lighter
+    -- than the blockquote rule: that one sits beside text and has to hold its own
+    -- against it, whereas this one is alone on the line and only has to separate.
+    MDEDIT_HR_H = 3,
+    MDEDIT_HR_GRAY = Blitbuffer.Color8(160),
 }
 
 M.MAP = {

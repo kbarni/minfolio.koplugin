@@ -10,7 +10,7 @@ detail; this document only summarises it enough to place `minfolio_pair.lua`,
 `minfolio_remote.lua`, and `minfolio_app.lua`'s remote-session code in the module map.
 
 The plugin is 29 Lua files: a 156-line `main.lua` entry point plus 28 `minfolio_*`-prefixed
-modules, flat in `minfolio.koplugin/` (no subdirectories), totalling 10,213 lines (`wc -l`,
+modules, flat in `minfolio.koplugin/` (no subdirectories), totalling 10,441 lines (`wc -l`,
 summed). `minfolio_sync.lua`/`minfolio_sync.sh` is a separate file but not part of this graph — it
 is a separate OS process with its own `LUA_PATH`, launched by the desktop over SSH, never
 `require`d by anything KOReader loads (see [The kshell launch contract](#the-kshell-launch-contract)
@@ -30,7 +30,7 @@ current as of this writing. Line counts are `wc -l`.
 
 | Module | Lines | Role | Requires (minfolio_\*) |
 |---|---|---|---|
-| `minfolio_md.lua` | 400 | Markdown parsing: `md_inline`, `md_tokenize`, `md_trim`, the table-row/table-block grammar, the fenced-code-block grammar (`md_fence`/`md_fence_closes`/`md_code_block`/`md_code_map`/`md_code_token`), `md_split_line_prefix`, `md_toggle_task`, `MD.heading` | none |
+| `minfolio_md.lua` | 530 | Markdown parsing: `md_inline`, `md_tokenize`, `md_trim`, the table-row/table-block grammar, the fenced-code-block grammar (`md_fence`/`md_fence_closes`/`md_code_block`/`md_code_map`/`md_code_token`), `md_quote_prefix` (blockquote markers and nesting depth), `md_thematic_break` (the horizontal rule), `md_split_line_prefix`, `md_line_continuation` (what Enter writes: list markers, task boxes and blockquote markers, and which of them an Enter on an empty one ends), `md_toggle_task`, `MD.heading` | none |
 | `minfolio_text.lua` | 117 | UTF-8 movement, word boundaries, path helpers, `split_text_lines`, `is_markdown_file`, `copy_arr`, `clean_entry_name` (the file/folder name validator, moved down from `minfolio_browser` when `File: Save as` became a second caller) | none |
 | `minfolio_map_model.lua` | 126 | `mindmap_node`, `parse_mindmap` (Markdown → tree, and back) | `minfolio_md`, `minfolio_text` |
 | `minfolio_find.lua` | 101 | Find/replace over a lines array: `matches` (literal, case-insensitive, non-overlapping, byte columns), `replace_one`, `replace_all`, `sanitize_replacement` | none |
@@ -44,7 +44,7 @@ current as of this writing. Line counts are `wc -l`.
 | `minfolio_config.lua` | 65 | `plugin_dir`, `load_local_config`/`CONFIG`, `NOTES_DIR`/`STATE_DIR` and every other state path (`MINFOLIO_PAIR_PATH`, `MINFOLIO_REMOTE_DIR`, `FL_STATE_PATH`, `MINFOLIO_STATE_PATH`), `path_parent`, the old-state-dir migration | none |
 | `minfolio_io.lua` | 60 | `write_file`/`read_file`/`file_signature`/`same_file_signature`/`now_seconds` | none |
 | `minfolio_keys.lua` | 214 | Modifier decoding, key-name aliasing, direction predicates, `makeKeyboardArrowFree`/`disableKeyboardKeyFlash` | none |
-| `minfolio_const.lua` | 142 | The `MDEDIT_*`/`MINDMAP_*` layout/timing constants plus the palette's filter debounce, as `{ EDIT = {...}, MAP = {...}, PALETTE = {...} }`, and `VERSION` (here rather than in `_meta.lua`, which every plugin has and which `require` therefore cannot disambiguate) | none |
+| `minfolio_const.lua` | 165 | The `MDEDIT_*`/`MINDMAP_*` layout/timing constants plus the palette's filter debounce, as `{ EDIT = {...}, MAP = {...}, PALETTE = {...} }`, and `VERSION` (here rather than in `_meta.lua`, which every plugin has and which `require` therefore cannot disambiguate) | none |
 | `minfolio_style.lua` | 48 | `MD_FACES`, `md_face`, `md_color`, `MDEDIT_TABLE_PAD_X`/`_Y` | none |
 | `minfolio_state.lua` | 59 | `MINFOLIO_STATE`, scale clamp/save, per-note cursor/scroll positions | `minfolio_config`, `minfolio_io` |
 | `minfolio_frontlight.lua` | 160 | The `FL` table, brightness/warmth via `lipc`, suspend/resume capture | `minfolio_config`, `minfolio_io` |
@@ -68,10 +68,10 @@ current as of this writing. Line counts are `wc -l`.
 
 | Module | Lines | Role | Requires (minfolio_\*) |
 |---|---|---|---|
-| `minfolio_edit_layout.lua` | 358 | Wrapping, the visual-row cache, measurement caches, visual-row coordinate math (18 methods + `free_wrap_entry`) | `minfolio_md`, `minfolio_text`, `minfolio_style`, `minfolio_const` |
+| `minfolio_edit_layout.lua` | 442 | Wrapping, the visual-row cache, measurement caches, visual-row coordinate math, blockquote indent (`quoteIndent`) and the pass that joins a quote's rule across paragraph gaps (19 methods + `free_wrap_entry`) | `minfolio_md`, `minfolio_text`, `minfolio_style`, `minfolio_const` |
 | `minfolio_edit_tables.lua` | 401 | The whole table subsystem, kept as one contiguous unit (11 methods) | `minfolio_md`, `minfolio_text`, `minfolio_style`, `minfolio_const`, `minfolio_keys` |
-| `minfolio_edit_view.lua` | 944 | `rebuild`/`refresh`, dirty regions, caret blink, top bar, progress bar, `runTopAction`'s dispatch table, `openPalette`/`showOutline` (29 methods) | `minfolio_text`, `minfolio_io`, `minfolio_style`, `minfolio_const`, `minfolio_chrome`, `minfolio_frontlight`, `minfolio_palette` |
-| `minfolio_edit.lua` | 2,332 | The `MDEdit` class itself: init, lifecycle, text ops, undo/redo, selection, clipboard, find/replace/outline/word count, `paletteState`, `newNote`/`saveAs`/`saveToNewPath`/`showAbout`/`selectNone`/`insertCodeBlock`, the `handKeyboardTo` focus handover, input, gestures (including the checkbox hit test), save/restorePosition, remote-inbox polling, and the mixin assembly (123 methods) | `minfolio_md`, `minfolio_text`, `minfolio_find`, `minfolio_stats`, `minfolio_config`, `minfolio_io`, `minfolio_state`, `minfolio_const`, `minfolio_keys`, `minfolio_frontlight`, `minfolio_chrome`, `minfolio_app`, `minfolio_map_view`, `minfolio_edit_layout`, `minfolio_edit_tables`, `minfolio_edit_view` |
+| `minfolio_edit_view.lua` | 980 | `rebuild`/`refresh`, dirty regions, caret blink, top bar, progress bar, code-block bands, blockquote rules and horizontal rules, `runTopAction`'s dispatch table, `openPalette`/`showOutline` (29 methods) | `minfolio_text`, `minfolio_io`, `minfolio_style`, `minfolio_const`, `minfolio_chrome`, `minfolio_frontlight`, `minfolio_palette` |
+| `minfolio_edit.lua` | 2,324 | The `MDEdit` class itself: init, lifecycle, text ops, undo/redo, selection, clipboard, find/replace/outline/word count, `paletteState`, `newNote`/`saveAs`/`saveToNewPath`/`showAbout`/`selectNone`/`insertCodeBlock`, the `handKeyboardTo` focus handover, input, gestures (including the checkbox hit test), save/restorePosition, remote-inbox polling, and the mixin assembly (123 methods) | `minfolio_md`, `minfolio_text`, `minfolio_find`, `minfolio_stats`, `minfolio_config`, `minfolio_io`, `minfolio_state`, `minfolio_const`, `minfolio_keys`, `minfolio_frontlight`, `minfolio_chrome`, `minfolio_app`, `minfolio_map_view`, `minfolio_edit_layout`, `minfolio_edit_tables`, `minfolio_edit_view` |
 
 **Tier 5 — shell and entry**
 
@@ -318,9 +318,9 @@ smoke-test territory only: widget lifecycle, e-ink repaint correctness, keyboard
 gestures, UI stack transitions, rotation, and desktop pairing.
 
 Running `sh scripts/deploy.sh` locally (parse-check stage) confirms the current state: 40
-`*.lua` files parse cleanly, and the eight test files together run **667 assertions, 0
+`*.lua` files parse cleanly, and the eight test files together run **741 assertions, 0
 failing** (`minfolio_find_test.lua`: 52, `minfolio_map_model_test.lua`: 42,
-`minfolio_md_test.lua`: 175, `minfolio_menu_model_test.lua`: 84,
+`minfolio_md_test.lua`: 249, `minfolio_menu_model_test.lua`: 84,
 `minfolio_pairing_store_test.lua`: 67, `minfolio_pair_msg_test.lua`: 106,
 `minfolio_stats_test.lua`: 74, `minfolio_text_test.lua`: 67).
 

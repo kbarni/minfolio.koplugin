@@ -6,7 +6,7 @@ Run these before publishing or tagging a release.
 device before every release: it glob-parse-checks every `minfolio.koplugin/*.lua`, runs the
 GGET lint (catches a moved/renamed symbol left behind as a silent global read — see
 `ARCHITECTURE.md` for what it does and does not catch), runs the off-device test suite
-(`*_test.lua`, currently the eight Tier 0 modules — 667 assertions), then transfers the
+(`*_test.lua`, currently the eight Tier 0 modules — 741 assertions), then transfers the
 plugin as one atomic operation, parse-checks it again on the device, and attempts a restart
 with a load-assertion check. Do not hand-duplicate that chain here; the two commands below
 are only for a quick, network-free local check of the same parse/test gates:

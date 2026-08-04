@@ -87,11 +87,25 @@ function MDEdit:trimToWidth(text, maxw, face)
     return best
 end
 -- word-wrap a logical line into visual rows that fit availw; each row/seg tracks its start byte
+-- Left inset of a blockquote at `depth` levels, rule included (see the constants'
+-- comment). Scaled by the text scale so the quote keeps its proportions when the
+-- reader changes text size -- bumpScale drops the wrap cache, so a scaled indent
+-- can be baked into cached rows safely.
+function MDEdit:quoteIndent(depth)
+    local levels = math.min(math.max(1, math.floor(depth or 1)), C.EDIT.MDEDIT_QUOTE_MAX_DEPTH)
+    return math.floor(levels * C.EDIT.MDEDIT_QUOTE_INDENT * (self.scale or 1))
+end
 function MDEdit:layoutLine(toks, availw)
     local rows, byte = {}, 0
     local hanging = 0
     local base_indent = 0
-    if toks.block == "bullet" then
+    if toks.block == "quote" then
+        -- Continuation rows hang at the same inset, not under the first word: a
+        -- wrapped quote is still inside the same rule, so its left edge has to
+        -- stay flush with the line above it.
+        base_indent = self:quoteIndent(toks.quote_depth)
+        hanging = base_indent
+    elseif toks.block == "bullet" then
         -- Nesting depth: leading whitespace becomes real horizontal indent (the
         -- marker glyph itself carries no indent). Continuation rows hang under the
         -- text, so they start at base_indent + marker width.
@@ -191,16 +205,18 @@ function MDEdit:computeVisualRows(text_w)
     local function emit(i, key, entry)
         cache[key] = entry
         for ri, row in ipairs(entry.rows) do
-            out[#out+1] = { kind = "row", line = i, row = row, block = entry.block, ri = ri }
+            out[#out+1] = { kind = "row", line = i, row = row, block = entry.block, ri = ri,
+                quote = entry.quote }
         end
     end
     local function build(toks)
-        return { rows = self:layoutLine(toks, text_w), block = toks.block }
+        return { rows = self:layoutLine(toks, text_w), block = toks.block, quote = toks.quote_depth }
     end
     local function appendLine(i)
         local text = self.lines[i]
         -- `or` short-circuits, so a cache hit never reaches md_tokenize.
-        emit(i, text, cache[text] or (prev and prev[text]) or build(MD.md_tokenize(text)[1]))
+        local entry = cache[text] or (prev and prev[text]) or build(MD.md_tokenize(text)[1])
+        emit(i, text, entry)
         if i < #self.lines then
             out[#out+1] = { kind = "gap", line = i, h = C.EDIT.MDEDIT_PARA_GAP }
         end
@@ -248,6 +264,29 @@ function MDEdit:computeVisualRows(text_w)
         else
             appendLine(i)
             i = i + 1
+        end
+    end
+    -- Join a blockquote's vertical rule across the paragraph gaps inside it.
+    -- Without this the rule is a column of dashes with a MDEDIT_PARA_GAP-sized
+    -- hole at every line break -- the same problem fenced code blocks solve with
+    -- their `code = true` gaps.
+    --
+    -- Decided from what was actually emitted rather than by looking ahead at the
+    -- next source line: a quoted TABLE row ("> | a | b |") is laid out by the
+    -- table branch above and carries no quote depth, so a lookahead reading the
+    -- raw text would see "> " and leave a rule stub dangling above a table that
+    -- draws none. Reading the neighbouring rows cannot disagree with them.
+    local pending_gap, prev_quote = nil, nil
+    for idx, entry in ipairs(out) do
+        if entry.kind == "gap" then
+            if not entry.code then pending_gap = idx end
+        else
+            if pending_gap then
+                local through = math.min(prev_quote or 0, entry.quote or 0)
+                if through > 0 then out[pending_gap].quote = through end
+                pending_gap = nil
+            end
+            prev_quote = entry.quote
         end
     end
     if old_cache then
@@ -310,9 +349,17 @@ function MDEdit:updateVisualLine(line)
         if vrows[vi].kind ~= "row" then return false end
     end
     local toks = MD.md_tokenize(text)[1]
+    -- A change in blockquote depth is structural in the same way a fence is,
+    -- just over a shorter reach: the rule drawn in the paragraph gaps either
+    -- side of this line is the minimum of its depth and its neighbour's, and
+    -- only the full computeVisualRows pass recomputes those. Editing a line into
+    -- or out of a quote here would leave a rule stub hanging above or below it,
+    -- so hand that case back to the full relayout.
+    if (toks.quote_depth or 0) ~= (vrows[range.first].quote or 0) then return false end
     local replacement = {}
     for ri, row in ipairs(self:layoutLine(toks, text_w)) do
-        replacement[#replacement+1] = { kind = "row", line = line, row = row, block = toks.block, ri = ri }
+        replacement[#replacement+1] = { kind = "row", line = line, row = row, block = toks.block, ri = ri,
+            quote = toks.quote_depth }
     end
     -- Release native glyph buffers for only the superseded rows. These rows are
     -- not stored in the content-keyed wrap cache on this incremental path.
