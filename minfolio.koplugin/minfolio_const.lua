@@ -43,7 +43,13 @@ M.EDIT = {
     MDEDIT_TITLE_ACTION_GAP = 18,
     MDEDIT_MENU_W = 52,
     MDEDIT_TITLE_W = 360,
-    MDEDIT_PROGRESS_H = 2,
+    -- Progress bar: thickness, and the gap between the last line of text and it.
+    -- Its bottom inset is MDEDIT_PAD (see rebuild's BottomContainer), so the bar
+    -- lines up with the left and right margins of the text frame. The text budget
+    -- in rebuild reserves exactly MDEDIT_PROGRESS_GAP + MDEDIT_PROGRESS_H above
+    -- that inset, so raising either one takes room from the text rather than
+    -- letting the bar creep up under the last line.
+    MDEDIT_PROGRESS_H = 4,
     MDEDIT_PROGRESS_GAP = 10,
     MDEDIT_LINE_HEIGHT = 0.80,
     MDEDIT_LINE_GAP = 0,

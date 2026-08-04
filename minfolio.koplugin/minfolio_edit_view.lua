@@ -443,18 +443,27 @@ function MDEdit:rebuild()
         x = 0, y = editor_top, w = self.fw,
         h = math.max(1, refresh_bottom - editor_top),
     }
-    -- The progress bar is pinned to the very bottom of the screen (below the text
-    -- frame's padding) so it holds a fixed position regardless of how much text is
-    -- on screen, and never crowds the last line. It's dropped entirely while the
-    -- keyboard is up -- it would only sit hidden behind the keys, and skipping it
-    -- frees that strip for text.
+    -- The progress bar is pinned to the bottom of the screen so it holds a fixed
+    -- position regardless of how much text is on screen, and never crowds the last
+    -- line. It's dropped entirely while the keyboard is up -- it would only sit
+    -- hidden behind the keys, and skipping it frees that strip for text.
+    --
+    -- Inset by MDEDIT_PAD, the same margin the text frame uses, so the bar's ends
+    -- line up with the text's left and right edges (BottomContainer centres its
+    -- content, and progressBar is built at that same width). This is also what
+    -- body_bottom above already assumes: it reserves PAD + GAP + PROGRESS_H at the
+    -- bottom, so any other inset here would put the bar somewhere other than the
+    -- space the text budget kept clear for it.
     local layers = OverlapGroup:new{
         dimen = Geom:new{ x = 0, y = 0, w = self.fw, h = self.fh },
         FrameContainer:new{ background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = C.EDIT.MDEDIT_PAD,
             width = self.fw, height = self.fh, vg },
     }
     if not self.keyboard then
-        layers[#layers+1] = BottomContainer:new{ dimen = Geom:new{ w = self.fw, h = self.fh - 5 }, self:progressBar(cw) }
+        layers[#layers+1] = BottomContainer:new{
+            dimen = Geom:new{ w = self.fw, h = self.fh - C.EDIT.MDEDIT_PAD },
+            self:progressBar(cw),
+        }
     end
     self[1] = layers
 end
