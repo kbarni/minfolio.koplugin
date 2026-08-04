@@ -110,4 +110,14 @@ M.MAP = {
     MINDMAP_PAN_MIN_VISIBLE = Screen:scaleBySize(80),
 }
 
+M.PALETTE = {
+    -- How long the command palette waits after the last keystroke before it
+    -- re-filters and repaints (PALETTE_PLAN.md §5.4). Filtering per character
+    -- would cost one partial e-ink refresh per character, which no Kindle keeps
+    -- up with; the editor's own type buffer exists for exactly this reason. Long
+    -- enough to coalesce a burst of typing, short enough that a deliberate pause
+    -- feels answered.
+    FILTER_DEBOUNCE = 0.35,
+}
+
 return M

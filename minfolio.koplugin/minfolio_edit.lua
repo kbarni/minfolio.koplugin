@@ -1500,6 +1500,11 @@ function MDEdit:onKeyPress(key)
         if lname == "f" then self:openFindDialog(); return true
         elseif lname == "g" then self:findNext(self._find_query, Keys.keymod(m, "Shift") and -1 or 1); return true
         elseif lname == "w" then self:showWordCount(); return true
+        -- The palette is deliberately in this read-only group rather than the
+        -- editing one below: it is the way to reach every command, and reader
+        -- mode needs it at least as much as editing mode does. The model hides
+        -- the commands that reader mode cannot run.
+        elseif lname == "p" then self:openPalette(); return true
         end
     end
     if self.reader_mode then
