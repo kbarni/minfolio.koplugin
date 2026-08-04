@@ -37,11 +37,13 @@
 --     with no amber LED can never use Warmth. Neither of those flickers, so
 --     hiding costs no stability.
 --
--- Phase 1 declares only commands that already exist in the editor. The eight new
--- ones (New, Save as, Select none, Code block, About, Quit, and the two display
--- toggles) are phase 2 and each adds one row here -- see PALETTE_PLAN.md §8.
--- Everything reachable from today's openControls is present, which is acceptance
--- criterion 8; do not drop a row without checking that list.
+-- Phase 1 declared only commands that already existed in the editor. P2-1 added
+-- five (New, Save as, Select none, Code block, About) -- `Quit` turned out to
+-- need no row, because PALETTE_PLAN.md §7.1 resolves it to what `file_close`
+-- already does. The two display toggles (toolbar, line numbers) are still to
+-- come, in P2-2 and P2-4. Everything reachable from the old openControls is
+-- present, which is acceptance criterion 8; do not drop a row without checking
+-- that list.
 --
 -- Required by callers as `local Model = require("minfolio_menu_model")`.
 
@@ -66,9 +68,19 @@ local M = {}
 --              `keep` flag (minfolio_chrome.lua), whose behaviour this preserves.
 local COMMANDS = {
     -- File ------------------------------------------------------------------
+    -- New and Save as are both `local_file`: a remote document is a session
+    -- shadow the desktop owns, with nowhere on this device for a sibling note to
+    -- go and no way to tell the desktop the file was renamed.
+    { id = "file_new",    group = "File", label = "New note...", action = "new_note",
+      enable = "local_file" },
     { id = "file_open",   group = "File", label = "Open .md file...", action = "open_markdown",
       enable = "local_file" },
     { id = "file_save",   group = "File", label = "Save", action = "save", accel = "Ctrl-S" },
+    { id = "file_save_as", group = "File", label = "Save as...", action = "save_as",
+      enable = "local_file" },
+    -- This IS PALETTE_PLAN.md §7.1's `File: Quit`, resolved. "Quit" next to
+    -- "Open" reads as leaving Minfolio for KOReader, which nothing implements;
+    -- the label states what actually happens instead of promising that.
     { id = "file_close",  group = "File", label = "Save and close note", action = "close" },
 
     -- Edit ------------------------------------------------------------------
@@ -84,6 +96,8 @@ local COMMANDS = {
       mode = "edit", enable = "clipboard" },
     { id = "edit_select_all", group = "Edit", label = "Select all", action = "select_all",
       accel = "Ctrl-A", mode = "edit" },
+    { id = "edit_select_none", group = "Edit", label = "Select none", action = "select_none",
+      mode = "edit", enable = "selection" },
     { id = "edit_find",   group = "Edit", label = "Find...", action = "find_input", accel = "Ctrl-F" },
     { id = "edit_find_next", group = "Edit", label = "Find next", action = "find_next",
       accel = "Ctrl-G", enable = "find_query" },
@@ -135,7 +149,15 @@ local COMMANDS = {
       accel = "Ctrl-Shift-O", mode = "edit" },
     { id = "style_check",   group = "Style", label = "Check list", action = "task",
       accel = "Ctrl-Shift-T", mode = "edit" },
+    -- "Code" wraps a selection in single backticks (inline); "Code block" opens a
+    -- fenced region. Both labels contain "code", so a "code" query offers the
+    -- pair rather than silently picking one.
+    { id = "style_code_block", group = "Style", label = "Code block", action = "code_block",
+      mode = "edit" },
     { id = "style_table",   group = "Style", label = "Table", action = "table", mode = "edit" },
+
+    -- Help ------------------------------------------------------------------
+    { id = "help_about",  group = "Help", label = "About Minfolio", action = "about" },
 }
 
 function M.commands()

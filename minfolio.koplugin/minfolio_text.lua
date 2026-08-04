@@ -8,7 +8,8 @@
 --
 -- Ported verbatim from minfolio.koplugin/main.lua (PLAN.md §5 Tier 0, §10 step 2): utf8_left,
 -- utf8_right, utf8_snap, char_is_space, prev_word_col, next_word_col, split_text_lines,
--- path_join, path_base, is_markdown_file, copy_arr.
+-- path_join, path_base, is_markdown_file, copy_arr. clean_entry_name arrived later, moved down
+-- from minfolio_browser (PALETTE_PLAN.md P2-1) once a second caller needed it.
 --
 -- Deliberately EXCLUDES path_parent: it reads the module-level NOTES_DIR config value, so it
 -- belongs in minfolio_config (a later work package), not here.
@@ -87,6 +88,30 @@ end
 
 function M.is_markdown_file(name)
     return tostring(name or ""):lower():match("%.md$") ~= nil
+end
+
+-- Validates a user-typed file or folder name, returning the cleaned name or nil
+-- when it must be refused. Was a local in minfolio_browser (Tier 5); moved here
+-- unchanged when File: Save as (PALETTE_PLAN.md P2-1) gave the editor a second
+-- place that has to reject exactly the same names. Two copies of a validator
+-- drift, and the divergence shows up as a browser that refuses a name the editor
+-- accepts -- so it lives in the one tier where a test can reach it.
+--
+-- Refuses, in order: empty/whitespace-only, "." and ".." (which name a directory,
+-- not a new entry), anything containing "/" (a name is not a path -- this is what
+-- stops a typed "../../foo" escaping the notes tree), and any embedded NUL, which
+-- would truncate the path at the C boundary and hit a different file than the one
+-- shown to the user.
+--
+-- add_md_ext appends ".md" only when the name carries no extension at all, so
+-- "notes" becomes "notes.md" while a deliberate "notes.txt" is left alone.
+function M.clean_entry_name(name, add_md_ext)
+    name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" or name == "." or name == ".." or name:find("/", 1, true) or name:find("%z") then
+        return nil
+    end
+    if add_md_ext and not name:match("%.%w+$") then name = name .. ".md" end
+    return name
 end
 
 return M

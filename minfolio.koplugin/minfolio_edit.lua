@@ -573,6 +573,16 @@ function MDEdit:selectAll()
     self.crow = #self.lines; self.ccol = #self.lines[#self.lines]
     self:refresh{ layout_dirty = false, selection = true, full = true }
 end
+-- Drops the selection, leaving the caret where the selection ended (which is
+-- where self.crow/ccol already point -- self.sel holds the other end). The early
+-- return keeps a no-op from costing a full-screen e-ink repaint; the palette
+-- greys the command in that state, but a chord or a future caller need not know
+-- that. PALETTE_PLAN.md P2-1.
+function MDEdit:selectNone()
+    if not self:hasSel() then return end
+    self.sel = nil
+    self:refresh{ layout_dirty = false, selection = true, full = true }
+end
 -- The snapshot minfolio_menu_model's predicates run against (PALETTE_PLAN.md
 -- §4.2). Plain values only -- no methods, no widgets -- because that is what
 -- keeps every enable/hide/check rule a pure function the off-device suite can
@@ -1227,6 +1237,31 @@ function MDEdit:showInfo(text)
     end
     UIManager:show(msg)
 end
+-- The showInfo handover above, as something a caller can apply to a widget it did
+-- not build. `MDEdit:newNote` needs it for a dialog the BROWSER constructs, which
+-- rules out doing the handover inside the constructor the way showInfo does.
+--
+-- CloseWidget, not the dialog's own buttons: UIManager broadcasts it on every
+-- teardown route, whereas a Cancel callback only covers the routes someone
+-- remembered. Missing one leaves is_always_active false for the rest of the
+-- session, and the editor then ignores the keyboard entirely -- the same defect
+-- the palette shipped with in P1-2 and the same fix.
+function MDEdit:handKeyboardTo(widget)
+    if not widget then return widget end
+    local restored = false
+    local function restore_focus()
+        if restored then return end
+        restored = true
+        self.is_always_active = true
+    end
+    self.is_always_active = false
+    local original_close = widget.onCloseWidget
+    function widget:onCloseWidget()
+        if original_close then original_close(self) end
+        restore_focus()
+    end
+    return widget
+end
 function MDEdit:setReaderMode(enabled, target_row, target_col)
     enabled = not not enabled
     if self.reader_mode == enabled then return end
@@ -1446,6 +1481,99 @@ function MDEdit:saveAndOpenMarkdown()
     if keyboard then UIManager:close(keyboard) end
     UIManager:close(self)
     App.openPicker(Config.path_parent(self.path))
+end
+-- File: New (PALETTE_PLAN.md P2-1). The name prompt, the validation and the
+-- creation all belong to the browser; this only asks for them, in the folder the
+-- current note lives in.
+--
+-- Nothing is closed here. The browser's edit_note already closes a live editor
+-- before opening the next note, so closing first would leave a blank screen for
+-- as long as the dialog is up -- and would throw away the current note for
+-- nothing if the user cancelled.
+function MDEdit:newNote()
+    self:flushTypeBuffer()
+    self:save()   -- edit_note will close this editor without asking again
+    self:handKeyboardTo(App.newNote(Config.path_parent(self.path)))
+end
+-- File: Save as (PALETTE_PLAN.md P2-1). Writes the document under a new name in
+-- the same folder and keeps editing it there, leaving the original on disk as it
+-- was at its last save.
+function MDEdit:saveAs()
+    self:flushTypeBuffer()
+    local dlg
+    dlg = InputDialog:new{
+        title = _("Save as"),
+        input = Text.path_base(self.path),
+        buttons = {{
+            { text = _("Cancel"), callback = function() UIManager:close(dlg) end },
+            { text = _("Save"), is_enter_default = true, callback = function()
+                local name = Text.clean_entry_name(dlg:getInputText(), true)
+                UIManager:close(dlg)
+                if not name then Chrome.notify(_("Invalid name")); return end
+                local path = Text.path_join(Config.path_parent(self.path), name)
+                -- Saving under the name it already has is a plain Save, not a
+                -- rename onto itself -- and must not trip the exists check below.
+                if path == self.path then
+                    if self:save() then Chrome.notify(_("Saved")) end
+                    return
+                end
+                -- Refused rather than confirmed. The browser refuses a colliding
+                -- name too, and silently overwriting another note from a text
+                -- field with no undo is the wrong default for a destructive act.
+                if lfs.attributes(path, "mode") then Chrome.notify(_("Name already exists")); return end
+                self:saveToNewPath(path)
+            end },
+        }},
+    }
+    UIManager:show(dlg)
+    dlg:onShowKeyboard()
+    self:handKeyboardTo(dlg)
+end
+-- Retarget this editor at `new_path` and write there. Split out of saveAs so the
+-- retarget-and-roll-back-on-failure sequence is readable on its own.
+function MDEdit:saveToNewPath(new_path)
+    local old_path = self.path
+    self.path = new_path
+    -- The old file's signature says nothing about a file that does not exist
+    -- yet; leaving it would make the external-change poller compare the new
+    -- path against the old file's mtime/size and announce a phantom edit.
+    self._file_signature = nil
+    if not self:save() then
+        self.path = old_path
+        self._file_signature = IO.file_signature(old_path)
+        return false
+    end
+    -- The position entry is keyed by path, so the new file needs its own. The
+    -- old key is deliberately left in place: that note still exists on disk with
+    -- the content it had, and its remembered position is still true of it.
+    self:savePosition()
+    -- The title bar shows the basename, and topBar's cache key is built from
+    -- width and mode only -- it does not notice a renamed document. Without this
+    -- the note would keep its old name on screen until something else happened
+    -- to change the width or the mode. (PALETTE_PLAN.md §6.2 fixes the key
+    -- itself; until then, every path that renames the document owes this line.)
+    self._topbar_cache = nil
+    -- on_close still returns to the folder captured when the note was opened,
+    -- which is the same folder: Save as cannot move a note between directories,
+    -- because clean_entry_name rejects anything containing a slash.
+    self:refresh{ layout_dirty = false, full = true }
+    Chrome.notify(_("Saved as ") .. Text.path_base(new_path))
+    return true
+end
+-- Help: About (PALETTE_PLAN.md P2-1). The version is minfolio_const's, not
+-- _meta.lua's -- see the comment on C.VERSION for why the plan's original home
+-- for it would have collided with every other plugin's _meta.
+function MDEdit:showAbout()
+    self:showInfo(table.concat({
+        _("Minfolio") .. "  " .. C.VERSION,
+        "",
+        _("A live-styled Markdown editor for KOReader."),
+        "",
+        _("https://github.com/kbarni/minfolio.koplugin"),
+        "",
+        _("Default documents folder") .. ": " .. tostring(Config.NOTES_DIR),
+        _("License") .. ": AGPL-3.0-only",
+    }, "\n"))
 end
 function MDEdit:onCloseWidget()
     Chrome.trace("editor-close", "path=", tostring(self.path), "dirty=", self._dirty and "yes" or "no")
@@ -1774,6 +1902,39 @@ function MDEdit:insertTable()
     end
     self.crow = math.min(#self.lines, body_row)
     self.ccol = math.min(2, #(self.lines[self.crow] or ""))
+    self:refresh()
+end
+-- Style: Code block (PALETTE_PLAN.md P2-1). Fenced blocks have rendered since
+-- 80c2943 but nothing inserted one; this mirrors insertTable above, including
+-- its two cases -- an empty line is replaced in place, a line with text on it is
+-- split around the block so nothing is swallowed.
+--
+-- The caret lands on the blank middle line, inside the fence. Landing it on the
+-- opening ``` would put the next keystroke into the info string (the language
+-- tag), which is not where anyone means to start typing code.
+function MDEdit:insertCodeBlock()
+    self:snapshot(); self._burst = nil
+    if self:hasSel() then self:deleteSelection() end
+    local rows = { "```", "", "```" }
+    local l = self.lines[self.crow] or ""
+    local before, after = l:sub(1, self.ccol), l:sub(self.ccol + 1)
+    local body_row
+    if before == "" and after == "" then
+        self.lines[self.crow] = rows[1]
+        for i = 2, #rows do table.insert(self.lines, self.crow + i - 1, rows[i]) end
+        body_row = self.crow + 1
+    else
+        self.lines[self.crow] = before
+        local insert_at = self.crow
+        for _, row in ipairs(rows) do
+            insert_at = insert_at + 1
+            table.insert(self.lines, insert_at, row)
+        end
+        if after ~= "" then table.insert(self.lines, insert_at + 1, after) end
+        body_row = self.crow + 2
+    end
+    self.crow = math.min(#self.lines, body_row)
+    self.ccol = 0
     self:refresh()
 end
 function MDEdit:openMindmap()

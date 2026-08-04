@@ -34,6 +34,19 @@ local Blitbuffer = require("ffi/blitbuffer")
 
 local M = {}
 
+-- The shipped version, shown by Help: About (PALETTE_PLAN.md P2-1) and by
+-- nothing else. It lives here rather than in `_meta.lua`, where the plan first
+-- put it, for a reason the plan did not account for: KOReader shares one
+-- `package.loaded` across every installed plugin, and EVERY plugin has a file
+-- called `_meta.lua`. `require("_meta")` from the editor would therefore hand
+-- back whichever plugin's meta table happened to load first -- the exact
+-- collision the `minfolio_` prefix rule exists to prevent (ARCHITECTURE.md).
+-- KOReader itself `dofile`s `_meta.lua` and never reads a version out of it, so
+-- putting it there would buy nothing to offset that.
+--
+-- Bump this in the same commit as the release tag; RELEASE_CHECKLIST.md lists it.
+M.VERSION = "1.1"
+
 M.EDIT = {
     MDEDIT_PAD = 24,
     MDEDIT_TOPBAR_H = 56,

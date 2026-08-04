@@ -51,7 +51,7 @@ end
 do
     local ids, groups, actions = {}, {}, {}
     local dup_id, missing_field, unknown_group = nil, nil, nil
-    local known = { File = true, Edit = true, View = true, Style = true }
+    local known = { File = true, Edit = true, View = true, Style = true, Help = true }
     for _, cmd in ipairs(Model.commands()) do
         if ids[cmd.id] then dup_id = cmd.id end
         ids[cmd.id] = true
@@ -67,11 +67,8 @@ do
     check("commands: ids are unique", dup_id == nil)
     check("commands: every command has a label, an action and a group", missing_field == nil)
     check("commands: no command lands in an undeclared group", unknown_group == nil)
-    check("commands: all four phase-1 groups are populated",
-        groups.File and groups.Edit and groups.View and groups.Style)
-    -- Help is empty in phase 1 (its only member, About, is phase 2), and an empty
-    -- group would render as a heading with nothing under it.
-    check("commands: no empty Help group is declared", groups.Help == nil)
+    check("commands: every declared group is populated",
+        groups.File and groups.Edit and groups.View and groups.Style and groups.Help)
 
     local reused = nil
     for action, count in pairs(actions) do
@@ -168,6 +165,11 @@ do
     local rows = Model.visible_commands(full_state{ has_selection = false })
     check("enabled: no selection greys Copy", by_id(rows, "edit_copy").enabled == false)
     check("enabled: no selection greys Cut", by_id(rows, "edit_cut").enabled == false)
+    -- Select none with nothing selected is the clearest no-op in the list; if it
+    -- were live it would run a repaint to change nothing.
+    check("enabled: no selection greys Select none", by_id(rows, "edit_select_none").enabled == false)
+    check("enabled: a selection enables Select none",
+        by_id(Model.visible_commands(full_state()), "edit_select_none").enabled == true)
     check("enabled: no selection leaves Copy in the list", by_id(rows, "edit_copy") ~= nil)
     check("enabled: no selection leaves Paste alone", by_id(rows, "edit_paste").enabled == true)
     check("enabled: no selection leaves the list length unchanged",
@@ -206,6 +208,28 @@ do
     check("enabled: a remote session leaves Save alone", by_id(rows, "file_save").enabled == true)
     check("enabled: a remote session leaves Save and close alone",
         by_id(rows, "file_close").enabled == true)
+    -- Both would act on the local filesystem, which a session shadow is not part
+    -- of: New has nowhere to put a sibling note, and Save as would rename a file
+    -- the desktop still believes it owns.
+    check("enabled: a remote session greys New", by_id(rows, "file_new").enabled == false)
+    check("enabled: a remote session greys Save as", by_id(rows, "file_save_as").enabled == false)
+    check("enabled: a local file leaves New and Save as alone",
+        by_id(Model.visible_commands(full_state()), "file_new").enabled == true
+        and by_id(Model.visible_commands(full_state()), "file_save_as").enabled == true)
+end
+
+do
+    -- P2-1's mode split. New/Save as/About are file- and app-level, so they stay
+    -- while reading; Select none and Code block need a caret, which reader mode
+    -- has not got. Getting this wrong is not cosmetic: runTopAction's
+    -- reader-mode guard would swallow anything offered here but dispatched below
+    -- it, and the command would silently do nothing.
+    local reading = Model.visible_commands(full_state{ reader_mode = true })
+    check("visible: New survives reader mode", by_id(reading, "file_new") ~= nil)
+    check("visible: Save as survives reader mode", by_id(reading, "file_save_as") ~= nil)
+    check("visible: About survives reader mode", by_id(reading, "help_about") ~= nil)
+    check("visible: reader mode hides Select none", by_id(reading, "edit_select_none") == nil)
+    check("visible: reader mode hides Code block", by_id(reading, "style_code_block") == nil)
 end
 
 -- ---------------------------------------------------------------------------
@@ -294,6 +318,29 @@ end
 do
     check("filter: a query matching nothing returns an empty list",
         #Model.filter("zzzznotacommand", full_state()) == 0)
+end
+
+do
+    -- Inline code and a fenced block are different commands with overlapping
+    -- names. A substring filter must offer both rather than resolving the
+    -- ambiguity on the user's behalf, and declaration order decides which is
+    -- selected first -- so "code" must not silently start running Code block.
+    local rows = Model.filter("code", full_state())
+    check("filter: 'code' offers both inline Code and Code block",
+        #rows == 2 and by_id(rows, "style_code") and by_id(rows, "style_code_block"))
+    check("filter: the inline Code command is offered first",
+        rows[1] ~= nil and rows[1].id == "style_code")
+    check("filter: 'code block' narrows to the fenced one",
+        #Model.filter("code block", full_state()) == 1
+        and Model.filter("code block", full_state())[1].id == "style_code_block")
+end
+
+do
+    -- Save and "Save as..." share a prefix, and "Save and close note" contains
+    -- the word "save" too. Typing "save" must not hide any of them.
+    local rows = Model.filter("save", full_state())
+    check("filter: 'save' offers Save, Save as and Save and close",
+        by_id(rows, "file_save") and by_id(rows, "file_save_as") and by_id(rows, "file_close"))
 end
 
 do

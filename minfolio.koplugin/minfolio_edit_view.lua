@@ -827,6 +827,9 @@ function MDEdit:runTopAction(name)
     -- behaviour.
     elseif name == "close" then self:saveAndClose()
     elseif name == "save" then if self:save() then Chrome.notify(_("Saved")) end
+    elseif name == "save_as" then self:saveAs()
+    elseif name == "new_note" then self:newNote()
+    elseif name == "about" then self:showAbout()
     elseif name == "open_markdown" then self:saveAndOpenMarkdown()
     elseif name == "outline" then self:showOutline()
     elseif name == "word_count" then self:showWordCount()
@@ -853,6 +856,8 @@ function MDEdit:runTopAction(name)
     elseif name == "mindmap" then self:openMindmap()
     elseif name == "reader" then self:setReaderMode(true)
     elseif name == "table" then self:insertTable()
+    elseif name == "code_block" then self:insertCodeBlock()
+    elseif name == "select_none" then self:selectNone()
     -- Edit-only additions. `smaller`/`larger`/`close` used to be here too and
     -- are now above the guard; there is no second copy.
     elseif name == "code" then self:fmtWrap("`")

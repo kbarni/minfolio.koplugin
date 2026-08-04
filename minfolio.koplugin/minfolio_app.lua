@@ -3,8 +3,9 @@
 -- live editor singleton and the two entry points a remote (desktop) session
 -- uses to start/stop editing, plus a small hook table the file/note browser
 -- registers into at load time. `minfolio_browser` registers `edit_note`,
--- `open_markdown_picker` and `show_file_manager` here as `M.hooks.open_note`
--- / `.open_picker` / `.file_manager` when it loads, and every other
+-- `open_markdown_picker`, `show_file_manager` and `show_new_entry_dialog` here
+-- as `M.hooks.open_note` / `.open_picker` / `.file_manager` / `.new_note`
+-- when it loads, and every other
 -- subsystem (the editor, the plugin entry, and the remote-session entry
 -- points below) calls
 -- through `M.*` instead of reaching for those names directly.
@@ -55,7 +56,7 @@ M.active = nil
 -- PLAN.md §5 Tier 5's `minfolio_browser` is a later extraction) registers
 -- into at load time, so every other subsystem calls through M.* instead of
 -- reaching for the browser's functions directly.
-M.hooks = { open_note = nil, open_picker = nil, file_manager = nil }
+M.hooks = { open_note = nil, open_picker = nil, file_manager = nil, new_note = nil }
 
 function M.setActive(ed)
     M.active = ed
@@ -81,6 +82,19 @@ end
 
 function M.openFileManager(dir)
     if M.hooks.file_manager then M.hooks.file_manager(dir) end
+end
+
+-- The editor's File: New (PALETTE_PLAN.md P2-1). Prompts for a name in `dir`,
+-- creates the note and opens it; the browser's edit_note closes whatever editor
+-- is live first, so this needs no cooperation from the caller beyond asking.
+--
+-- Returns the dialog widget, unlike the hooks above, because the one caller is
+-- an is_always_active editor that has to hand the keyboard over for exactly as
+-- long as the dialog is up. Nil when no browser has registered, which the caller
+-- must tolerate -- that is the same nil-tolerance every hook here has.
+function M.newNote(dir)
+    if M.hooks.new_note then return M.hooks.new_note(dir) end
+    return nil
 end
 
 -- A remote session is deliberately dormant until the desktop explicitly

@@ -204,5 +204,53 @@ end
 
 check("copy_arr: an empty array copies to an empty array", #Text.copy_arr({}) == 0)
 
+-- ---------------------------------------------------------------------------
+-- clean_entry_name
+-- ---------------------------------------------------------------------------
+
+do
+    check("clean_entry_name: an ordinary name passes through", Text.clean_entry_name("draft.md") == "draft.md")
+    check("clean_entry_name: surrounding whitespace is trimmed", Text.clean_entry_name("  draft.md  ") == "draft.md")
+    check("clean_entry_name: inner spaces are kept", Text.clean_entry_name("my long note.md") == "my long note.md")
+end
+
+do
+    -- The rejections. Each of these reaches the filesystem as a path if it is let
+    -- through, so they are the whole point of the function.
+    check("clean_entry_name: an empty name is refused", Text.clean_entry_name("") == nil)
+    check("clean_entry_name: a whitespace-only name is refused", Text.clean_entry_name("   ") == nil)
+    check("clean_entry_name: nil is refused rather than throwing", Text.clean_entry_name(nil) == nil)
+    check("clean_entry_name: '.' is refused", Text.clean_entry_name(".") == nil)
+    check("clean_entry_name: '..' is refused", Text.clean_entry_name("..") == nil)
+    -- A name is not a path. Without this, a typed "../../x" would write outside
+    -- the notes tree entirely.
+    check("clean_entry_name: a leading path traversal is refused", Text.clean_entry_name("../escape.md") == nil)
+    check("clean_entry_name: an embedded slash is refused", Text.clean_entry_name("sub/note.md") == nil)
+    check("clean_entry_name: an absolute path is refused", Text.clean_entry_name("/etc/passwd") == nil)
+    -- Trimming happens first, so a name that is only a slash once trimmed is
+    -- still caught.
+    check("clean_entry_name: whitespace around a slash does not smuggle it through",
+        Text.clean_entry_name("  a/b  ") == nil)
+    -- An embedded NUL truncates the path at the C boundary, so the file actually
+    -- touched would not be the one the name showed.
+    check("clean_entry_name: an embedded NUL is refused", Text.clean_entry_name("note\0.md") == nil)
+end
+
+do
+    check("clean_entry_name: add_md_ext appends .md to an extensionless name",
+        Text.clean_entry_name("notes", true) == "notes.md")
+    check("clean_entry_name: add_md_ext leaves an existing extension alone",
+        Text.clean_entry_name("notes.txt", true) == "notes.txt")
+    check("clean_entry_name: add_md_ext does not double up on .md",
+        Text.clean_entry_name("notes.md", true) == "notes.md")
+    -- Folders take add_md_ext = false, so the same name must survive unextended.
+    check("clean_entry_name: without add_md_ext no extension is invented",
+        Text.clean_entry_name("notes") == "notes")
+    -- A trailing dot is not an extension (%.%w+$ needs at least one word char),
+    -- so the extension is still appended.
+    check("clean_entry_name: a trailing dot does not count as an extension",
+        Text.clean_entry_name("notes.", true) == "notes..md")
+end
+
 print(string.format("%d passed, %d failed", passed, failed))
 os.exit(failed == 0 and 0 or 1)

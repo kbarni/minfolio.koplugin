@@ -45,7 +45,9 @@
 -- suite is included.
 --
 -- Ported verbatim from minfolio.koplugin/main.lua (PLAN.md §5 Tier 5, §10
--- step 9): `clean_entry_name`, `ensure_dir`, `remove_tree`, `dir_entries`,
+-- step 9): `clean_entry_name` (since moved down to minfolio_text, where the
+-- editor's Save as can reach it too -- PALETTE_PLAN.md P2-1), `ensure_dir`,
+-- `remove_tree`, `dir_entries`,
 -- `refresh_file_manager`, `attach_kbd_swipe`, `show_new_entry_dialog`,
 -- `show_rename_dialog`, `confirm_delete`, `show_item_actions`, `edit_note`,
 -- `open_markdown_picker`, `show_file_manager`, and `open_notes` (exported as
@@ -129,15 +131,6 @@ end
 -- (main.lua's `Minfolio:openLaunchTarget` `edit:` handler) -- reaches it via
 -- App.openNote(...) instead of requiring this module directly.
 App.hooks.open_note = edit_note
-
-local function clean_entry_name(name, add_md_ext)
-    name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if name == "" or name == "." or name == ".." or name:find("/", 1, true) or name:find("%z") then
-        return nil
-    end
-    if add_md_ext and not name:match("%.%w+$") then name = name .. ".md" end
-    return name
-end
 
 local function ensure_dir(path)
     if lfs.attributes(path, "mode") == "directory" then return true end
@@ -260,7 +253,7 @@ local function show_new_entry_dialog(menu, dir, kind)
         buttons = {{
             { text = _("Cancel"), callback = function() UIManager:close(dlg) end },
             { text = _("Create"), is_enter_default = true, callback = function()
-                local name = clean_entry_name(dlg:getInputText(), not is_folder)
+                local name = Text.clean_entry_name(dlg:getInputText(), not is_folder)
                 UIManager:close(dlg)
                 if not name then Chrome.notify(_("Invalid name")); return end
                 local path = Text.path_join(dir, name)
@@ -285,6 +278,20 @@ local function show_new_entry_dialog(menu, dir, kind)
     attach_kbd_swipe(dlg)
     UIManager:show(dlg)
     dlg:onShowKeyboard()
+    -- Returned so a caller that is itself a widget can hand the keyboard over for
+    -- this dialog's lifetime. The file listing has no use for it (it is not
+    -- is_always_active); the editor's File: New does -- see MDEdit:newNote.
+    return dlg
+end
+-- The editor's File: New (PALETTE_PLAN.md P2-1). `menu` is nil here: there is no
+-- file listing to close or refresh, only the editor underneath, and edit_note
+-- already closes a live editor before opening the next note -- so the ordinary
+-- note path through the dialog above needs no special case for this caller.
+--
+-- Registered as a hook rather than called directly, for the reason in this file's
+-- header: minfolio_edit.lua must never require minfolio_browser.
+App.hooks.new_note = function(dir)
+    return show_new_entry_dialog(nil, dir, "note")
 end
 
 local function show_rename_dialog(parent_menu, dir, item)
@@ -295,7 +302,7 @@ local function show_rename_dialog(parent_menu, dir, item)
         buttons = {{
             { text = _("Cancel"), callback = function() UIManager:close(dlg) end },
             { text = _("Rename"), is_enter_default = true, callback = function()
-                local name = clean_entry_name(dlg:getInputText(), item.kind == "file" and Text.is_markdown_file(item.name))
+                local name = Text.clean_entry_name(dlg:getInputText(), item.kind == "file" and Text.is_markdown_file(item.name))
                 UIManager:close(dlg)
                 if not name then Chrome.notify(_("Invalid name")); return end
                 if name == item.name then return end
