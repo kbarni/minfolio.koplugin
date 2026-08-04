@@ -9,15 +9,14 @@ execution. `PROTOCOL.md` covers the desktop pairing and document-sync wire proto
 detail; this document only summarises it enough to place `minfolio_pair.lua`,
 `minfolio_remote.lua`, and `minfolio_app.lua`'s remote-session code in the module map.
 
-The plugin is 22 Lua files: a 115-line `main.lua` entry point plus 21 `minfolio_*`-prefixed
-modules, flat in `minfolio.koplugin/` (no subdirectories), totalling 6,753 lines (`wc -l`,
+The plugin is 29 Lua files: a 156-line `main.lua` entry point plus 28 `minfolio_*`-prefixed
+modules, flat in `minfolio.koplugin/` (no subdirectories), totalling 9,921 lines (`wc -l`,
 summed). `minfolio_sync.lua`/`minfolio_sync.sh` is a separate file but not part of this graph — it
 is a separate OS process with its own `LUA_PATH`, launched by the desktop over SSH, never
 `require`d by anything KOReader loads (see [The kshell launch contract](#the-kshell-launch-contract)
-below and `PROTOCOL.md` for what it does). Three more files
-(`minfolio_md_test.lua`, `minfolio_text_test.lua`, `minfolio_map_model_test.lua`) are
-off-device test suites, not shipped to the device. `_meta.lua` and `config.example.lua`
-round out the 28 `*.lua` files `scripts/deploy.sh`'s glob checks find.
+below and `PROTOCOL.md` for what it does). Eight more files — one `*_test.lua` beside each
+Tier 0 module — are off-device test suites, not shipped to the device. `_meta.lua` and
+`config.example.lua` round out the 40 `*.lua` files `scripts/deploy.sh`'s glob checks find.
 
 ## Module map and the dependency graph
 
@@ -31,9 +30,12 @@ current as of this writing. Line counts are `wc -l`.
 
 | Module | Lines | Role | Requires (minfolio_\*) |
 |---|---|---|---|
-| `minfolio_md.lua` | 258 | Markdown parsing: `md_inline`, `md_tokenize`, `md_trim`, the table-row/table-block grammar, `md_split_line_prefix`, `MD.heading` | none |
+| `minfolio_md.lua` | 400 | Markdown parsing: `md_inline`, `md_tokenize`, `md_trim`, the table-row/table-block grammar, the fenced-code-block grammar (`md_fence`/`md_fence_closes`/`md_code_block`/`md_code_map`/`md_code_token`), `md_split_line_prefix`, `md_toggle_task`, `MD.heading` | none |
 | `minfolio_text.lua` | 92 | UTF-8 movement, word boundaries, path helpers, `split_text_lines`, `is_markdown_file`, `copy_arr` | none |
 | `minfolio_map_model.lua` | 126 | `mindmap_node`, `parse_mindmap` (Markdown → tree, and back) | `minfolio_md`, `minfolio_text` |
+| `minfolio_find.lua` | 101 | Find/replace over a lines array: `matches` (literal, case-insensitive, non-overlapping, byte columns), `replace_one`, `replace_all`, `sanitize_replacement` | none |
+| `minfolio_stats.lua` | 177 | Word/character/line/paragraph counts: `is_word`, `count_words`, `count_chars`, `plain_text` (Markdown syntax stripped via `md_tokenize`), `count`, `reading_minutes`, `group_digits` | `minfolio_md` |
+| `minfolio_menu_model.lua` | 226 | The editor's command set as data — the 34 commands, their grouping, `command_state` (visible/enabled/checked from a state snapshot), `display_text`, `visible_commands`, and `filter` (plain substring, declaration order preserved). Rendered by `minfolio_palette`; dispatched through `MDEdit:runTopAction` by action *string*, which is what keeps this module KOReader-free | none |
 
 **Tier 1 — KOReader adapters and app-wide services**
 
@@ -42,11 +44,12 @@ current as of this writing. Line counts are `wc -l`.
 | `minfolio_config.lua` | 65 | `plugin_dir`, `load_local_config`/`CONFIG`, `NOTES_DIR`/`STATE_DIR` and every other state path (`MINFOLIO_PAIR_PATH`, `MINFOLIO_REMOTE_DIR`, `FL_STATE_PATH`, `MINFOLIO_STATE_PATH`), `path_parent`, the old-state-dir migration | none |
 | `minfolio_io.lua` | 60 | `write_file`/`read_file`/`file_signature`/`same_file_signature`/`now_seconds` | none |
 | `minfolio_keys.lua` | 214 | Modifier decoding, key-name aliasing, direction predicates, `makeKeyboardArrowFree`/`disableKeyboardKeyFlash` | none |
-| `minfolio_const.lua` | 108 | The 58 `MDEDIT_*`/`MINDMAP_*` layout/timing constants, as `{ EDIT = {...}, MAP = {...} }` | none |
+| `minfolio_const.lua` | 123 | The `MDEDIT_*`/`MINDMAP_*` layout/timing constants plus the palette's filter debounce, as `{ EDIT = {...}, MAP = {...}, PALETTE = {...} }` | none |
 | `minfolio_style.lua` | 48 | `MD_FACES`, `md_face`, `md_color`, `MDEDIT_TABLE_PAD_X`/`_Y` | none |
 | `minfolio_state.lua` | 59 | `MINFOLIO_STATE`, scale clamp/save, per-note cursor/scroll positions | `minfolio_config`, `minfolio_io` |
 | `minfolio_frontlight.lua` | 160 | The `FL` table, brightness/warmth via `lipc`, suspend/resume capture | `minfolio_config`, `minfolio_io` |
 | `minfolio_chrome.lua` | 204 | Battery indicator, the shared controls popup, `notify`, `rotate_screen_ccw`, `trace()` | `minfolio_frontlight` |
+| `minfolio_palette.lua` | 364 | The command palette: a centred, searchable `Menu` over `minfolio_menu_model`, opened by the hamburger or `Ctrl-P`. Owns its own key handling (arrows/Enter/Esc/type-to-filter) because KOReader's `Menu` and `FocusManager` both gate their bindings on `hasKeys`/`hasDPad`, false on a touch-only Kindle. Deliberately not an `MDEdit` mixin — it takes a state snapshot and two callbacks and knows nothing about the editor | `minfolio_menu_model`, `minfolio_keys`, `minfolio_text`, `minfolio_const` |
 
 **Tier 2 — desktop transport**
 
@@ -67,8 +70,8 @@ current as of this writing. Line counts are `wc -l`.
 |---|---|---|---|
 | `minfolio_edit_layout.lua` | 358 | Wrapping, the visual-row cache, measurement caches, visual-row coordinate math (18 methods + `free_wrap_entry`) | `minfolio_md`, `minfolio_text`, `minfolio_style`, `minfolio_const` |
 | `minfolio_edit_tables.lua` | 401 | The whole table subsystem, kept as one contiguous unit (11 methods) | `minfolio_md`, `minfolio_text`, `minfolio_style`, `minfolio_const`, `minfolio_keys` |
-| `minfolio_edit_view.lua` | 838 | `rebuild`/`refresh`, dirty regions, caret blink, top bar, progress bar (28 methods) | `minfolio_text`, `minfolio_io`, `minfolio_style`, `minfolio_const`, `minfolio_chrome` |
-| `minfolio_edit.lua` | 1,771 | The `MDEdit` class itself: init, lifecycle, text ops, undo/redo, selection, clipboard, find/outline, input, gestures, save/restorePosition, remote-inbox polling, and the mixin assembly (103 methods) | `minfolio_md`, `minfolio_text`, `minfolio_config`, `minfolio_io`, `minfolio_state`, `minfolio_const`, `minfolio_keys`, `minfolio_frontlight`, `minfolio_chrome`, `minfolio_app`, `minfolio_map_view`, `minfolio_edit_layout`, `minfolio_edit_tables`, `minfolio_edit_view` |
+| `minfolio_edit_view.lua` | 930 | `rebuild`/`refresh`, dirty regions, caret blink, top bar, progress bar, `runTopAction`'s dispatch table, `openPalette`/`showOutline` (29 methods) | `minfolio_text`, `minfolio_io`, `minfolio_style`, `minfolio_const`, `minfolio_chrome`, `minfolio_frontlight`, `minfolio_palette` |
+| `minfolio_edit.lua` | 2,173 | The `MDEdit` class itself: init, lifecycle, text ops, undo/redo, selection, clipboard, find/replace/outline/word count, `paletteState`, input, gestures (including the checkbox hit test), save/restorePosition, remote-inbox polling, and the mixin assembly (116 methods) | `minfolio_md`, `minfolio_text`, `minfolio_find`, `minfolio_stats`, `minfolio_config`, `minfolio_io`, `minfolio_state`, `minfolio_const`, `minfolio_keys`, `minfolio_frontlight`, `minfolio_chrome`, `minfolio_app`, `minfolio_map_view`, `minfolio_edit_layout`, `minfolio_edit_tables`, `minfolio_edit_view` |
 
 **Tier 5 — shell and entry**
 
@@ -298,8 +301,10 @@ mixins). The dependency edge stays one-way in both directions: `browser → app`
 
 ## What can and cannot be tested off-device
 
-Only three modules have any automated test coverage: `minfolio_md.lua`,
-`minfolio_text.lua`, and `minfolio_map_model.lua` — the Tier 0 modules, and no others. Their
+Only the Tier 0 modules have any automated test coverage, and no others — but all eight of
+them carry a suite: `minfolio_md.lua`, `minfolio_text.lua`, `minfolio_map_model.lua`,
+`minfolio_pair_msg.lua`, `minfolio_pairing_store.lua`, `minfolio_find.lua`,
+`minfolio_stats.lua`, and `minfolio_menu_model.lua`. Their
 own header comments state the reason plainly: each is "deliberately zero KOReader
 dependencies... not a style preference, it is the only way any of this can be checked
 off-device." Every other module requires at least one real KOReader module (`Device`,
@@ -312,10 +317,22 @@ means "cannot be automatically tested at all here" — everything outside Tier 0
 smoke-test territory only: widget lifecycle, e-ink repaint correctness, keyboard ownership,
 gestures, UI stack transitions, rotation, and desktop pairing.
 
-Running `sh scripts/deploy.sh` locally (parse-check stage) confirms the current state: 28
-`*.lua` files parse cleanly, and the three test files together run **187 assertions, 0
-failing** (`minfolio_map_model_test.lua`: 39, `minfolio_md_test.lua`: 99,
-`minfolio_text_test.lua`: 49).
+Running `sh scripts/deploy.sh` locally (parse-check stage) confirms the current state: 40
+`*.lua` files parse cleanly, and the eight test files together run **636 assertions, 0
+failing** (`minfolio_find_test.lua`: 52, `minfolio_map_model_test.lua`: 42,
+`minfolio_md_test.lua`: 175, `minfolio_menu_model_test.lua`: 71,
+`minfolio_pairing_store_test.lua`: 67, `minfolio_pair_msg_test.lua`: 106,
+`minfolio_stats_test.lua`: 74, `minfolio_text_test.lua`: 49).
+
+The command palette is the worked example of choosing where that boundary falls. Its
+substance — which commands exist, how they group, when each is visible/greyed/ticked, and
+what a query matches — is `minfolio_menu_model.lua`, Tier 0 and fully covered. What is left
+in `minfolio_palette.lua` is widget wiring, and it is untestable here: two of its defects
+were found only by running it (a focus-restore path that `Menu`'s `close_callback` never
+reaches, and KOReader inserting title-bar rows at the top of `FocusManager`'s layout so that
+"row 1" is not the first command). Both are the kind of thing no amount of source reading
+settles. See the note on driving a desktop KOReader in `CLAUDE.md` — that, not the test
+suite, is what covers this half.
 
 **The purity discipline that makes this possible has to be preserved deliberately, not
 assumed.** It would be easy, while extending `minfolio_md.lua`, to reach for a KOReader
@@ -327,9 +344,11 @@ keeps this from happening is the one `PLAN.md §4` already drew and the
 current module split preserves exactly: `minfolio_md.lua` holds parsing
 (`md_inline`/`md_tokenize`/...) and `minfolio_style.lua` holds the render-facing half
 (`md_face`/`md_color`, which need `Font`/`Blitbuffer`) as a separate, KOReader-dependent
-module. Any change that adds a KOReader `require` to `minfolio_md.lua`,
-`minfolio_text.lua`, or `minfolio_map_model.lua` needs to be treated as removing that
-module's only test coverage, not as a small addition.
+module. `minfolio_menu_model.lua`/`minfolio_palette.lua` is the same cut made a second time,
+and its header lists the three habits that would breach it: `gettext` on the labels,
+closures instead of action strings, and predicates reading the editor instead of a snapshot.
+Any change that adds a KOReader `require` to a Tier 0 module needs to be treated as removing
+that module's only test coverage, not as a small addition.
 
 ## The GGET lint
 

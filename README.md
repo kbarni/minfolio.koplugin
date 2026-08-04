@@ -19,9 +19,11 @@ automatically as ordinary `.md` files you can sync anywhere.
 
 - **Live styling as you type** — headings, **bold**, *italic*, `code`, and lists render inline while you write.
 - **Tables** — write pipe tables and edit cells directly in a rendered reader view.
+- **Tap-to-tick checkboxes** — tap the box on a `- [ ]` line to check or uncheck it, while editing or while reading. Only the box changes, and the cursor stays where you left it.
 - **Reader mode** — flip from editing to a clean, fully rendered view of your document.
 - **Mindmap mode** — view the same `.md` as a native Kindle tree, select branches, zoom, add/delete nodes, undo, reorder siblings, and reattach branches.
-- **Find** — search the document from a compact find bar (or Ctrl-F) with Previous/Next and a match counter.
+- **Find and replace** — search the document from a compact find bar (or Ctrl-F) with Previous/Next and a match counter, then replace one match at a time or all at once (Ctrl-H). A whole Replace all is a single undo.
+- **Word count** — words, characters, paragraphs, reading time, the size of your selection, and how much you have written this session (Ctrl-W). Markdown syntax never inflates the number: `## Heading` is one word.
 - **Outline** — jump straight to any heading from a nested list of the document's structure.
 - **Picks up where you left off** — reopening a note restores the passage you were reading, your cursor, and whether you were in reader mode.
 - **Real editing** — overlay caret, word wrap, undo/redo, selection, and copy/paste.
@@ -38,6 +40,26 @@ Minfolio is built and tested on a **jailbroken Kindle Paperwhite 5**. It runs as
 
 For an optimal typing experience, it is recommended to use it with an external keyboard.
 On Kindle, use the excellent [Bluetooth-HID-Passthrough](https://github.com/zampierilucas/kindle-hid-passthrough) library to pair Bluetooth keyboards.
+
+### Keyboard shortcuts
+
+Every formatting action on the toolbar has a chord, so writing never needs the touchscreen.
+Ctrl is Command on a Mac keyboard.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl-B` / `Ctrl-I` / `Ctrl-E` | Bold / italic / inline code |
+| `Ctrl-1` … `Ctrl-6` | Heading level (again on the same level, or `Ctrl-0`, makes it a paragraph) |
+| `Ctrl-Shift-L` / `Ctrl-Shift-O` / `Ctrl-Shift-T` | Bullet list / numbered list / checkbox |
+| `Tab` / `Shift-Tab` | Indent / outdent a list item |
+| `Ctrl-F` / `Ctrl-G` / `Ctrl-Shift-G` | Find / next match / previous match |
+| `Ctrl-H` | Find and replace |
+| `Ctrl-W` | Word count |
+| `Ctrl-S` | Save now (notes autosave anyway) |
+| `Ctrl-Z` / `Ctrl-Shift-Z` or `Ctrl-Y` | Undo / redo |
+| `Ctrl-A` / `Ctrl-C` / `Ctrl-X` / `Ctrl-V` | Select all / copy / cut / paste |
+
+Find, next/previous match and word count also work in reader mode.
 
 You can also use [Syncthing](https://github.com/arthurrump/syncthing.koplugin) plugin to automatically sync your notes with your desktop computer.
 You can also use the *Desktop companion* app -> see below.
