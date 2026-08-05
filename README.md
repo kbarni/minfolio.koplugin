@@ -1,6 +1,6 @@
 # Minfolio Markdown Editor for Koreader
 
-**A simple, distraction-free Markdown editor and word processor for Koreader.**
+**A simple, distraction-free Markdown editor and note taking app for Koreader.**
 
 Minfolio turns your e-reader into a comfortable writing device: weeks of battery, a glare-free
 e-ink screen, and nothing on it but your words. You type in plain Markdown and watch it style itself
@@ -36,10 +36,14 @@ automatically as ordinary `.md` files you can sync anywhere.
 ## Usage
 
 Minfolio is built and tested on a **jailbroken Kindle Paperwhite 5**. It runs as a
-[KOReader](https://github.com/koreader/koreader) plugin,https://github.com/arthurrump/syncthing.koplugin launched fron the *Tools* menu.
+[KOReader](https://github.com/koreader/koreader) plugin, launched fron the *Tools* menu.
+
+To install the plugin, unzip the Release file in the Koreader plugins folder.
 
 For an optimal typing experience, it is recommended to use it with an external keyboard.
 On Kindle, use the excellent [Bluetooth-HID-Passthrough](https://github.com/zampierilucas/kindle-hid-passthrough) library to pair Bluetooth keyboards.
+
+To continue editing on the desktop, use the *Minfolio Desktop* companion app (see below). Alternatively you can synchronize the notes folder with your computer using the [Syncthing](https://github.com/arthurrump/syncthing.koplugin) plugin.
 
 ### Keyboard shortcuts
 
@@ -60,44 +64,6 @@ Ctrl is Command on a Mac keyboard.
 | `Ctrl-A` / `Ctrl-C` / `Ctrl-X` / `Ctrl-V` | Select all / copy / cut / paste |
 
 Find, next/previous match and word count also work in reader mode.
-
-You can also use [Syncthing](https://github.com/arthurrump/syncthing.koplugin) plugin to automatically sync your notes with your desktop computer.
-You can also use the *Desktop companion* app -> see below.
-
-## Install
-
-Install the KOReader plugin:
-
-```sh
-mkdir -p /mnt/us/koreader/plugins/minfolio.koplugin
-cp minfolio.koplugin/*.lua minfolio.koplugin/minfolio_sync.sh /mnt/us/koreader/plugins/minfolio.koplugin/
-chmod 755 /mnt/us/koreader/plugins/minfolio.koplugin/minfolio_sync.sh
-```
-
-The plugin is now split across more than 20 files (see [Project layout](#project-layout)
-below), so this is a directory copy, not a handful of named files — copying the three
-`*_test.lua` files and `config.example.lua` along with it is harmless, they are development-only
-and nothing on the device loads them. `scripts/deploy.sh` (see [Development](#development))
-does the same copy over SSH with additional safety checks and is the recommended path if
-you have SSH access to the Kindle instead of a mounted filesystem.
-
-The KUAL launcher is retired — `minfolio-kual/` is commented out and installing it does nothing.
-Open Minfolio from KOReader itself (Tools → *Minfolio Markdown Editor*, or a gesture bound to the
-*Open Minfolio* dispatcher action).
-
-<!-- Retired KUAL launcher install steps, kept for restoration:
-
-Install the KUAL launcher as `/mnt/us/extensions/minfolio`:
-
-```sh
-mkdir -p /mnt/us/extensions/minfolio
-cp -R minfolio-kual/* /mnt/us/extensions/minfolio/
-```
-
-Then open Minfolio from the KUAL menu. (The launcher writes `notes` to `/tmp/minfolio_launch` and
-starts KOReader through `/mnt/us/koreader/koreader.sh --kual`.)
-
--->
 
 ## Config
 
