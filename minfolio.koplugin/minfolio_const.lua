@@ -45,7 +45,7 @@ local M = {}
 -- putting it there would buy nothing to offset that.
 --
 -- Bump this in the same commit as the release tag; RELEASE_CHECKLIST.md lists it.
-M.VERSION = "1.1"
+M.VERSION = "1.2"
 
 M.EDIT = {
     MDEDIT_PAD = 24,
