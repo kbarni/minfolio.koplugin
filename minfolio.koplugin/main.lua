@@ -1,6 +1,11 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
--- Minfolio: a native KOReader live-styled Markdown editor for the Kindle, launched from KUAL.
--- The KUAL shortcut writes a target into /tmp/minfolio_launch; this opens the notes browser at startup.
+-- Minfolio: a native KOReader live-styled Markdown editor for the Kindle.
+-- Anything that wants Minfolio to open something writes a target into
+-- /tmp/minfolio_launch and this consumes it at startup (and on a 0.5s poll).
+-- The KUAL launcher that used to write the "notes" target is retired (see
+-- minfolio-kual/, commented out), but the flag itself stays: kindle-mirror
+-- (kshell) and kindle-tools (kindle-send) write the edit:/remote:/remote-stop:
+-- forms and never involved KUAL.
 local Dispatcher = require("dispatcher")
 local Font = require("ui/font")
 Font.fontmap.ifont = Font.fontmap.ifont or "NotoSans-Italic.ttf"

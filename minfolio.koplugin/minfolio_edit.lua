@@ -129,7 +129,7 @@ function MDEdit:init()
     self:scheduleFilePoll()
     Chrome.trace("editor-open", "path=", tostring(self.path), "lines=", #self.lines,
         "remote=", self.remote and "yes" or "no")
-    self:scheduleHeartbeat(10)
+    self:scheduleHeartbeat(C.EDIT.MDEDIT_HEARTBEAT_FIRST)
 end
 -- Store a logical visual-row anchor, not a raw visual row number. This lets a
 -- note reopen at the same passage after a rotation or a font-size change has
@@ -429,6 +429,15 @@ end
 -- A heartbeat is intentionally infrequent.  If the UI loop is delayed, the
 -- next entry records the gap; if KOReader dies, the last marker identifies the
 -- last known healthy editor state without materially affecting battery life.
+--
+-- `gap` is wall clock (IO.now_seconds is socket.gettime), and a scheduled task
+-- does not run while the device is suspended, so an overnight sleep produces
+-- the same enormous gap a stalled UI loop would -- which made the number
+-- useless as the stall signal it exists to be.  onSuspend sets
+-- `_heartbeat_slept`, and a beat that finds it set reports `gap=suspended`
+-- instead of a duration and clears it, so a numeric gap now means the loop
+-- really was awake for that long.  The flag is cleared here rather than in
+-- onResume because it has to survive until the *next* beat reads it.
 function MDEdit:scheduleHeartbeat(delay)
     if self._heartbeat_pending then
         UIManager:unschedule(self._heartbeat_pending)
@@ -439,15 +448,21 @@ function MDEdit:scheduleHeartbeat(delay)
         if self._heartbeat_pending == fn then self._heartbeat_pending = nil end
         if self._closing then return end
         local now = IO.now_seconds()
-        local gap = self._heartbeat_at and (now - self._heartbeat_at) or 0
+        local gap
+        if self._heartbeat_slept then
+            gap = "suspended"
+            self._heartbeat_slept = nil
+        else
+            gap = string.format("%.2f", self._heartbeat_at and (now - self._heartbeat_at) or 0)
+        end
         Chrome.trace("editor-heartbeat", "path=", tostring(self.path),
-            "gap=", string.format("%.2f", gap), "row=", self.crow or 0,
+            "gap=", gap, "row=", self.crow or 0,
             "vtop=", self.vtop or 0, "dirty=", self._dirty and "yes" or "no")
         self._heartbeat_at = now
-        self:scheduleHeartbeat(60)
+        self:scheduleHeartbeat(C.EDIT.MDEDIT_HEARTBEAT_INTERVAL)
     end
     self._heartbeat_pending = fn
-    UIManager:scheduleIn(delay or 60, fn)
+    UIManager:scheduleIn(delay or C.EDIT.MDEDIT_HEARTBEAT_INTERVAL, fn)
 end
 function MDEdit:snapshot()
     self:scheduleAutosave()
@@ -1414,6 +1429,9 @@ function MDEdit:onResume()
 end
 function MDEdit:onSuspend()
     Chrome.trace("editor-suspend", "path=", tostring(self.path))
+    -- Read and cleared by the next heartbeat, which is why this is not undone
+    -- in onResume -- see MDEdit:scheduleHeartbeat.
+    self._heartbeat_slept = true
     FL.captureBeforeSuspend()
 end
 function MDEdit:schedulePhysicalKeyboardRepaint()

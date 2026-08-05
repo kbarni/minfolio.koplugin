@@ -81,6 +81,13 @@ M.EDIT = {
     MDEDIT_TYPE_FLUSH_DELAY = 0.045,
     MDEDIT_TYPE_BURST_IDLE = 0.30,
     MDEDIT_FILE_RELOAD_INTERVAL = 2.0,
+    -- Lifecycle heartbeat (see MDEdit:scheduleHeartbeat). The first beat is soon
+    -- after open -- it is the marker that says the editor survived its own
+    -- construction -- and the steady rate is deliberately slow: the line only
+    -- has to be recent enough to identify the last healthy state after a death
+    -- that runs no Lua, and every beat is a log line for the whole session.
+    MDEDIT_HEARTBEAT_FIRST = 10,
+    MDEDIT_HEARTBEAT_INTERVAL = 300,
     MDEDIT_KEYBOARD_SWIPE_EDGE = 90,
     MDEDIT_KEYBOARD_SWIPE_DY = 35,
     -- Hairline gap kept between the last text row and the keyboard's top edge, so the

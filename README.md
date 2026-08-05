@@ -81,6 +81,12 @@ and nothing on the device loads them. `scripts/deploy.sh` (see [Development](#de
 does the same copy over SSH with additional safety checks and is the recommended path if
 you have SSH access to the Kindle instead of a mounted filesystem.
 
+The KUAL launcher is retired — `minfolio-kual/` is commented out and installing it does nothing.
+Open Minfolio from KOReader itself (Tools → *Minfolio Markdown Editor*, or a gesture bound to the
+*Open Minfolio* dispatcher action).
+
+<!-- Retired KUAL launcher install steps, kept for restoration:
+
 Install the KUAL launcher as `/mnt/us/extensions/minfolio`:
 
 ```sh
@@ -90,6 +96,8 @@ cp -R minfolio-kual/* /mnt/us/extensions/minfolio/
 
 Then open Minfolio from the KUAL menu. (The launcher writes `notes` to `/tmp/minfolio_launch` and
 starts KOReader through `/mnt/us/koreader/koreader.sh --kual`.)
+
+-->
 
 ## Config
 
