@@ -11,17 +11,28 @@
 -- keyed store) is tested independently; this module is presentation only.
 --
 -- Deliberately does NOT use KOReader's stock main-menu `sub_item_table`/
--- `sub_item_table_func` mechanism: neither sibling plugin in this toolchain
--- (kshell.koplugin, kinbox.koplugin) uses it anywhere, so there is no local
--- precedent that the top-level `registerToMainMenu` menu actually honours
--- it, and no device available this session to check. Instead this builds
--- its own popout `Menu` widget exactly the way minfolio_chrome.lua's
--- `show_controls` already does (item_table + a custom onMenuSelect) --
--- that mechanism is a real, already-shipped feature of this same plugin, so
--- copying its shape is evidence-based rather than a second guess about
--- what the stock menu accepts. main.lua wires a single new top-level entry
--- (menu_items.minfolio_pairing) straight to M.open() below; the existing
--- "Minfolio" entry and its one-tap "open notes" behaviour are untouched.
+-- `sub_item_table_func` mechanism. The original reason given here was that
+-- neither sibling plugin (kshell.koplugin, kinbox.koplugin) uses it, so there
+-- was no local precedent that `registerToMainMenu` honours it -- that much has
+-- since been checked against KOReader v2026.07 and is simply wrong: it is
+-- honoured, `ui/widget/touchmenu.lua` resolves `sub_item_table` in
+-- onMenuSelect and `ui/menusorter.lua` grafts a `sorting_hint`ed entry into
+-- the hint menu's own sub_item_table. The mechanism was kept anyway, for a
+-- reason that survives the correction: touchmenu returns on `sub_item_table`
+-- *before* it ever reads `item.callback`, so hanging pairing off the existing
+-- "Minfolio" entry would have cost that entry its one-tap "open notes" tap.
+-- Instead this builds its own popout `Menu` widget exactly the way
+-- minfolio_chrome.lua's `show_controls` already does (item_table + a custom
+-- onMenuSelect) -- an already-shipped mechanism in this same plugin.
+--
+-- The entry point is a "Pair desktop..." row in the notes browser's own
+-- listing (minfolio_browser.lua's `header_items`, beside New note / New
+-- folder / Open .md file), which calls M.open() below. It used to be a second
+-- flat top-level KOReader entry (`menu_items.minfolio_pairing`); that was
+-- removed because a labelled row inside Minfolio is far easier to discover
+-- than a row buried in KOReader's more_tools submenu. M.open() shows a popout
+-- over the browser and does not close it, so pairing does not cost the user
+-- the folder they were in.
 --
 -- Text is rebuilt (M._buildItems) and pushed back into the visible menu via
 -- `menu:switchItemTable` -- also proven in this codebase, at the same call

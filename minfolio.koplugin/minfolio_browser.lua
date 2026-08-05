@@ -35,9 +35,17 @@
 -- -- main.lua's own forward declaration is gone entirely, not relocated
 -- ceremony re-added at a different address.
 --
--- `attach_kbd_swipe` and `refresh_file_manager` are internal helpers, not
--- exported -- everything else in this module reaches them as plain upvalues,
--- same as before the move.
+-- `attach_kbd_swipe`, `refresh_file_manager` and `header_items` are internal
+-- helpers, not exported -- everything else in this module reaches them as
+-- plain upvalues, same as before the move.
+--
+-- `header_items` also owns the "Pair desktop..." row, which is this plugin's
+-- only entry point to minfolio_pair_menu since the separate top-level
+-- KOReader menu entry (`menu_items.minfolio_pairing`) was dropped from
+-- main.lua. It lives in the listing rather than behind the title bar's
+-- hamburger (Chrome.show_controls) because an unlabelled icon on 1-bit e-ink
+-- is a weak discovery signal for a feature most users will look for exactly
+-- once.
 --
 -- Requires KOReader throughout (widgets, gestures, `libs/libkoreader-lfs`),
 -- so this cannot be `require`d and executed under plain luajit -- only
@@ -81,10 +89,34 @@ local Chrome = require("minfolio_chrome")
 local Frontlight = require("minfolio_frontlight")
 local App = require("minfolio_app")
 local MDEdit = require("minfolio_edit")
+-- The pairing menu, reached from the "Pair desktop..." header row below. Safe
+-- to require from here despite both being Tier 5: minfolio_pair_menu requires
+-- only Tier 0-2 (minfolio_pair, minfolio_pairing_store, minfolio_config,
+-- minfolio_chrome) and never reaches back into the browser, so this adds no
+-- cycle of the kind minfolio_app.lua's hook table exists to break.
+local PairMenu = require("minfolio_pair_menu")
 
 local M = {}
 
 local open_markdown_picker, show_file_manager   -- fwd decls; see header comment
+
+-- The fixed rows every folder listing starts with, in one place because there
+-- are two call sites that must agree: show_file_manager builds the first
+-- listing, and menu:minfolioNavigate rebuilds it on every folder change. When
+-- these were two literal tables, a row added to one but not the other produced
+-- a browser where the row vanished the moment you entered a subfolder.
+-- "Pair desktop..." is device-level rather than document-level, so it sits
+-- after the three document actions and is shown in every folder (same as them)
+-- rather than only at the notes root -- which folder you happen to be looking
+-- at has no bearing on pairing.
+local function header_items()
+    return {
+        { text = "＋ " .. _("New note"), kind = "new_note" },
+        { text = "＋ " .. _("New folder"), kind = "new_folder" },
+        { text = _("Open .md file..."), is_open = true },
+        { text = "⇄ " .. _("Pair desktop..."), kind = "pair" },
+    }
+end
 
 -- Only ever one editor at a time. Opening a note while another editor is live
 -- (e.g. a re-send via kindle-send, or a duplicate launch-flag write) must not
@@ -375,11 +407,7 @@ show_file_manager = function(start_dir)
 
     local dirs, files, ok = dir_entries(dir)
     local menu
-    local items = {
-        { text = "＋ " .. _("New note"), kind = "new_note" },
-        { text = "＋ " .. _("New folder"), kind = "new_folder" },
-        { text = _("Open .md file..."), is_open = true },
-    }
+    local items = header_items()
     if dir ~= Config.NOTES_DIR then items[#items+1] = { text = "../", kind = "dir_nav", path = Config.path_parent(dir) } end
     for _, name in ipairs(dirs) do
         local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(dir, name) }
@@ -442,6 +470,12 @@ show_file_manager = function(start_dir)
             if item.kind == "new_note" then show_new_entry_dialog(menu, current_dir, "note")
             elseif item.kind == "new_folder" then show_new_entry_dialog(menu, current_dir, "folder")
             elseif item.is_open then open_markdown_picker(current_dir)
+            -- Deliberately does NOT close the browser first, unlike the file
+            -- branch below: the pairing menu is its own popout Menu, so it
+            -- stacks on top and the listing is still there underneath when it
+            -- is dismissed. Arming a pairing window is not a reason to lose
+            -- the folder the user was in.
+            elseif item.kind == "pair" then PairMenu.open()
             elseif item.kind == "dir_nav" then refresh_file_manager(menu, item.path)
             elseif item.kind == "dir" then refresh_file_manager(menu, item.path)
             elseif item.kind == "file" then
@@ -462,11 +496,7 @@ show_file_manager = function(start_dir)
     function menu:minfolioNavigate(next_dir)
         if lfs.attributes(next_dir, "mode") ~= "directory" then return end
         local next_dirs, next_files, readable = dir_entries(next_dir)
-        local next_items = {
-            { text = "＋ " .. _("New note"), kind = "new_note" },
-            { text = "＋ " .. _("New folder"), kind = "new_folder" },
-            { text = _("Open .md file..."), is_open = true },
-        }
+        local next_items = header_items()
         if next_dir ~= Config.NOTES_DIR then next_items[#next_items+1] = { text = "../", kind = "dir_nav", path = Config.path_parent(next_dir) } end
         for _, name in ipairs(next_dirs) do
             local item = { text = name .. "/", kind = "dir", name = name, path = Text.path_join(next_dir, name) }

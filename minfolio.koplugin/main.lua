@@ -22,13 +22,11 @@ local App = require("minfolio_app")
 -- require graph, not read directly here -- only Minfolio:init's
 -- Pair.start() call site remains in this file).
 local Pair = require("minfolio_pair")
--- Kindle pairing menu (PAIRING_PLAN.md WP 3): arm/disarm, the verification
--- code, which channel is in play, and the paired-desktops list. Kept as its
--- own module rather than grown inline here, same reasoning as Browser below
--- -- this file is deliberately kept small (see ARCHITECTURE.md's local-
--- variable-ceiling history). Required here only for its addToMainMenu call
--- site below; owns no load-time side effects of its own.
-local PairMenu = require("minfolio_pair_menu")
+-- The Kindle pairing menu (minfolio_pair_menu, PAIRING_PLAN.md WP 3) is NOT
+-- required here any more: its only call site in this file was the top-level
+-- "Minfolio: pair desktop" menu entry, and that entry is gone (see
+-- addToMainMenu below). minfolio_browser.lua requires it now, since the row
+-- that opens it lives in the notes browser's listing.
 -- Notes browser (PLAN.md §5 Tier 5, §10 step 9) -- the last inline subsystem
 -- this file used to hold (dir listing/dialogs/edit_note). Required here for
 -- its load-time side effect (registering App.hooks.open_note/open_picker/
@@ -138,19 +136,19 @@ function Minfolio:onMinfolioOpen() Browser.open_notes(); return true end
 
 function Minfolio:addToMainMenu(menu_items)
     menu_items.minfolio = {
-        text = _("Minfolio"),
+        text = _("Minfolio Markdown Editor"),
         sorting_hint = "tools",
         callback = function() Browser.open_notes() end,
     }
-    -- A separate top-level entry (following kshell.koplugin's own precedent
-    -- of registering several flat menu_items.* entries rather than nesting
-    -- them under one), so the existing "Minfolio" entry's one-tap "open
-    -- notes" behaviour above is completely unchanged.
-    menu_items.minfolio_pairing = {
-        text = _("Minfolio: pair desktop"),
-        sorting_hint = "more_tools",
-        callback = function() PairMenu.open() end,
-    }
+    -- Pairing deliberately has NO top-level entry of its own any more. It used
+    -- to be a second flat menu_items.* row ("Minfolio: pair desktop", hinted
+    -- into more_tools); it now lives as a "Pair desktop..." row in the notes
+    -- browser's own listing, beside New note / New folder / Open .md file
+    -- (minfolio_browser.lua's header_items). Nesting it under this entry
+    -- instead was the other candidate and does work -- touchmenu.lua resolves
+    -- sub_item_table before it ever reads item.callback -- but that ordering is
+    -- exactly the problem: one row cannot both open notes on tap and expand a
+    -- submenu, so it would have cost this entry its one-tap behaviour.
 end
 
 return Minfolio
